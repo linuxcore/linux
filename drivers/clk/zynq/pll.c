@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Zynq PLL driver
  *
  *  Copyright (C) 2013 Xilinx
  *
  *  Sören Brinkmann <soren.brinkmann@xilinx.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License v2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
  */
 #include <linux/clk/zynq.h>
 #include <linux/clk-provider.h>
@@ -50,6 +38,9 @@ struct zynq_pll {
 #define PLLCTRL_RESET_MASK	1
 #define PLLCTRL_RESET_SHIFT	0
 
+#define PLL_FBDIV_MIN	13
+#define PLL_FBDIV_MAX	66
+
 /**
  * zynq_pll_round_rate() - Round a clock frequency
  * @hw:		Handle between common and hardware-specific interfaces
@@ -63,10 +54,10 @@ static long zynq_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 	u32 fbdiv;
 
 	fbdiv = DIV_ROUND_CLOSEST(rate, *prate);
-	if (fbdiv < 13)
-		fbdiv = 13;
-	else if (fbdiv > 66)
-		fbdiv = 66;
+	if (fbdiv < PLL_FBDIV_MIN)
+		fbdiv = PLL_FBDIV_MIN;
+	else if (fbdiv > PLL_FBDIV_MAX)
+		fbdiv = PLL_FBDIV_MAX;
 
 	return *prate * fbdiv;
 }
@@ -182,7 +173,13 @@ static const struct clk_ops zynq_pll_ops = {
 
 /**
  * clk_register_zynq_pll() - Register PLL with the clock framework
- * @np	Pointer to the DT device node
+ * @name:	PLL name
+ * @parent:	Parent clock name
+ * @pll_ctrl:	Pointer to PLL control register
+ * @pll_status:	Pointer to PLL status register
+ * @lock_index:	Bit index to this PLL's lock status bit in @pll_status
+ * @lock:	Register lock
+ * Returns handle to the registered clock.
  */
 struct clk *clk_register_zynq_pll(const char *name, const char *parent,
 		void __iomem *pll_ctrl, void __iomem *pll_status, u8 lock_index,
@@ -202,10 +199,8 @@ struct clk *clk_register_zynq_pll(const char *name, const char *parent,
 	};
 
 	pll = kmalloc(sizeof(*pll), GFP_KERNEL);
-	if (!pll) {
-		pr_err("%s: Could not allocate Zynq PLL clk.\n", __func__);
+	if (!pll)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	/* Populate the struct */
 	pll->hw.init = &initd;

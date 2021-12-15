@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_FIREWIRE_H
 #define _LINUX_FIREWIRE_H
 
@@ -200,6 +201,7 @@ struct fw_device {
 	unsigned irmc:1;
 	unsigned bc_implemented:2;
 
+	work_func_t workfn;
 	struct delayed_work work;
 	struct fw_attribute_group attribute_group;
 };
@@ -366,6 +368,9 @@ static inline int fw_stream_packet_destination_id(int tag, int channel, int sy)
 	return tag << 14 | channel << 8 | sy;
 }
 
+void fw_schedule_bus_reset(struct fw_card *card, bool delayed,
+			   bool short_reset);
+
 struct fw_descriptor {
 	struct list_head link;
 	size_t length;
@@ -431,6 +436,12 @@ typedef void (*fw_iso_callback_t)(struct fw_iso_context *context,
 				  void *header, void *data);
 typedef void (*fw_iso_mc_callback_t)(struct fw_iso_context *context,
 				     dma_addr_t completed, void *data);
+
+union fw_iso_callback {
+	fw_iso_callback_t sc;
+	fw_iso_mc_callback_t mc;
+};
+
 struct fw_iso_context {
 	struct fw_card *card;
 	int type;
@@ -438,10 +449,7 @@ struct fw_iso_context {
 	int speed;
 	bool drop_overflow_headers;
 	size_t header_size;
-	union {
-		fw_iso_callback_t sc;
-		fw_iso_mc_callback_t mc;
-	} callback;
+	union fw_iso_callback callback;
 	void *callback_data;
 };
 

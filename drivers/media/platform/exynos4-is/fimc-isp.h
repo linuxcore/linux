@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Samsung EXYNOS4x12 FIMC-IS (Imaging Subsystem) driver
  *
@@ -5,10 +6,6 @@
  *
  * Authors: Sylwester Nawrocki <s.nawrocki@samsung.com>
  *          Younghwan Joo <yhwan.joo@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #ifndef FIMC_ISP_H_
 #define FIMC_ISP_H_
@@ -21,10 +18,10 @@
 #include <linux/videodev2.h>
 
 #include <media/media-entity.h>
-#include <media/videobuf2-core.h>
+#include <media/videobuf2-v4l2.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-mediabus.h>
-#include <media/s5p_fimc.h>
+#include <media/drv-intf/exynos-fimc.h>
 
 extern int fimc_isp_debug;
 
@@ -35,17 +32,18 @@ extern int fimc_isp_debug;
 #define FIMC_ISP_SINK_WIDTH_MIN		(16 + 8)
 #define FIMC_ISP_SINK_HEIGHT_MIN	(12 + 8)
 #define FIMC_ISP_SOURCE_WIDTH_MIN	8
-#define FIMC_ISP_SOURC_HEIGHT_MIN	8
+#define FIMC_ISP_SOURCE_HEIGHT_MIN	8
 #define FIMC_ISP_CAC_MARGIN_WIDTH	16
 #define FIMC_ISP_CAC_MARGIN_HEIGHT	12
 
 #define FIMC_ISP_SINK_WIDTH_MAX		(4000 - 16)
 #define FIMC_ISP_SINK_HEIGHT_MAX	(4000 + 12)
 #define FIMC_ISP_SOURCE_WIDTH_MAX	4000
-#define FIMC_ISP_SOURC_HEIGHT_MAX	4000
+#define FIMC_ISP_SOURCE_HEIGHT_MAX	4000
 
 #define FIMC_ISP_NUM_FORMATS		3
 #define FIMC_ISP_REQ_BUFS_MIN		2
+#define FIMC_ISP_REQ_BUFS_MAX		32
 
 #define FIMC_ISP_SD_PAD_SINK		0
 #define FIMC_ISP_SD_PAD_SRC_FIFO	1
@@ -100,41 +98,65 @@ struct fimc_isp_ctrls {
 	struct v4l2_ctrl *colorfx;
 };
 
+struct isp_video_buf {
+	struct vb2_v4l2_buffer vb;
+	dma_addr_t dma_addr[FIMC_ISP_MAX_PLANES];
+	unsigned int index;
+};
+
+#define to_isp_video_buf(_b) container_of(_b, struct isp_video_buf, vb)
+
+#define FIMC_ISP_MAX_BUFS	4
+
 /**
  * struct fimc_is_video - fimc-is video device structure
- * @vdev: video_device structure
+ * @ve: video_device structure and media pipeline
  * @type: video device type (CAPTURE/OUTPUT)
  * @pad: video device media (sink) pad
  * @pending_buf_q: pending buffers queue head
  * @active_buf_q: a queue head of buffers scheduled in hardware
  * @vb_queue: vb2 buffer queue
- * @active_buf_count: number of video buffers scheduled in hardware
+ * @reqbufs_count: the number of buffers requested in REQBUFS ioctl
+ * @buf_count: number of video buffers scheduled in hardware
+ * @buf_mask: bitmask of the queued video buffer indices
  * @frame_count: counter of frames dequeued to user space
- * @reqbufs_count: number of buffers requested with REQBUFS ioctl
- * @format: current pixel format
+ * @streaming: is streaming in progress?
+ * @buffers: buffer info
+ * @format: current fimc pixel format
+ * @pixfmt: current pixel format
  */
 struct fimc_is_video {
-	struct video_device	vdev;
+	struct exynos_video_entity ve;
 	enum v4l2_buf_type	type;
 	struct media_pad	pad;
 	struct list_head	pending_buf_q;
 	struct list_head	active_buf_q;
 	struct vb2_queue	vb_queue;
-	unsigned int		frame_count;
 	unsigned int		reqbufs_count;
+	unsigned int		buf_count;
+	unsigned int		buf_mask;
+	unsigned int		frame_count;
 	int			streaming;
+	struct isp_video_buf	*buffers[FIMC_ISP_MAX_BUFS];
 	const struct fimc_fmt	*format;
+	struct v4l2_pix_format_mplane pixfmt;
 };
+
+/* struct fimc_isp:state bit definitions */
+#define ST_ISP_VID_CAP_BUF_PREP		0
+#define ST_ISP_VID_CAP_STREAMING	1
 
 /**
  * struct fimc_isp - FIMC-IS ISP data structure
  * @pdev: pointer to FIMC-IS platform device
- * @alloc_ctx: videobuf2 memory allocator context
  * @subdev: ISP v4l2_subdev
  * @subdev_pads: the ISP subdev media pads
+ * @src_fmt: source mediabus format
+ * @sink_fmt: sink mediabus format
  * @test_pattern: test pattern controls
  * @ctrls: v4l2 controls structure
- * @video_lock: mutex serializing video device and the subdev operations
+ * @video_lock: mutex serializing video device operations
+ * @subdev_lock: mutex serializing subdev operations
  * @cac_margin_x: horizontal CAC margin in pixels
  * @cac_margin_y: vertical CAC margin in pixels
  * @state: driver state flags
@@ -142,7 +164,6 @@ struct fimc_is_video {
  */
 struct fimc_isp {
 	struct platform_device		*pdev;
-	struct vb2_alloc_ctx		*alloc_ctx;
 	struct v4l2_subdev		subdev;
 	struct media_pad		subdev_pads[FIMC_ISP_SD_PADS_NUM];
 	struct v4l2_mbus_framefmt	src_fmt;

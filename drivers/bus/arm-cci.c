@@ -18,10 +18,77 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #include <asm/cacheflush.h>
 #include <asm/smp_plat.h>
+
+static void __iomem *cci_ctrl_base __ro_after_init;
+static unsigned long cci_ctrl_phys __ro_after_init;
+
+#ifdef CONFIG_ARM_CCI400_PORT_CTRL
+struct cci_nb_ports {
+	unsigned int nb_ace;
+	unsigned int nb_ace_lite;
+};
+
+static const struct cci_nb_ports cci400_ports = {
+	.nb_ace = 2,
+	.nb_ace_lite = 3
+};
+
+#define CCI400_PORTS_DATA	(&cci400_ports)
+#else
+#define CCI400_PORTS_DATA	(NULL)
+#endif
+
+static const struct of_device_id arm_cci_matches[] = {
+#ifdef CONFIG_ARM_CCI400_COMMON
+	{.compatible = "arm,cci-400", .data = CCI400_PORTS_DATA },
+#endif
+#ifdef CONFIG_ARM_CCI5xx_PMU
+	{ .compatible = "arm,cci-500", },
+	{ .compatible = "arm,cci-550", },
+#endif
+	{},
+};
+
+static const struct of_dev_auxdata arm_cci_auxdata[] = {
+	OF_DEV_AUXDATA("arm,cci-400-pmu", 0, NULL, &cci_ctrl_base),
+	OF_DEV_AUXDATA("arm,cci-400-pmu,r0", 0, NULL, &cci_ctrl_base),
+	OF_DEV_AUXDATA("arm,cci-400-pmu,r1", 0, NULL, &cci_ctrl_base),
+	OF_DEV_AUXDATA("arm,cci-500-pmu,r0", 0, NULL, &cci_ctrl_base),
+	OF_DEV_AUXDATA("arm,cci-550-pmu,r0", 0, NULL, &cci_ctrl_base),
+	{}
+};
+
+#define DRIVER_NAME		"ARM-CCI"
+
+static int cci_platform_probe(struct platform_device *pdev)
+{
+	if (!cci_probed())
+		return -ENODEV;
+
+	return of_platform_populate(pdev->dev.of_node, NULL,
+				    arm_cci_auxdata, &pdev->dev);
+}
+
+static struct platform_driver cci_platform_driver = {
+	.driver = {
+		   .name = DRIVER_NAME,
+		   .of_match_table = arm_cci_matches,
+		  },
+	.probe = cci_platform_probe,
+};
+
+static int __init cci_platform_init(void)
+{
+	return platform_driver_register(&cci_platform_driver);
+}
+
+#ifdef CONFIG_ARM_CCI400_PORT_CTRL
 
 #define CCI_PORT_CTRL		0x0
 #define CCI_CTRL_STATUS		0xc
@@ -29,11 +96,6 @@
 #define CCI_ENABLE_SNOOP_REQ	0x1
 #define CCI_ENABLE_DVM_REQ	0x2
 #define CCI_ENABLE_REQ		(CCI_ENABLE_SNOOP_REQ | CCI_ENABLE_DVM_REQ)
-
-struct cci_nb_ports {
-	unsigned int nb_ace;
-	unsigned int nb_ace_lite;
-};
 
 enum cci_ace_port_type {
 	ACE_INVALID_PORT = 0x0,
@@ -50,9 +112,6 @@ struct cci_ace_port {
 
 static struct cci_ace_port *ports;
 static unsigned int nb_cci_ports;
-
-static void __iomem *cci_ctrl_base;
-static unsigned long cci_ctrl_phys;
 
 struct cpu_port {
 	u64 mpidr;
@@ -120,19 +179,10 @@ int cci_ace_get_port(struct device_node *dn)
 }
 EXPORT_SYMBOL_GPL(cci_ace_get_port);
 
-static void __init cci_ace_init_ports(void)
+static void cci_ace_init_ports(void)
 {
-	int port, ac, cpu;
-	u64 hwid;
-	const u32 *cell;
-	struct device_node *cpun, *cpus;
-
-	cpus = of_find_node_by_path("/cpus");
-	if (WARN(!cpus, "Missing cpus node, bailing out\n"))
-		return;
-
-	if (WARN_ON(of_property_read_u32(cpus, "#address-cells", &ac)))
-		ac = of_n_addr_cells(cpus);
+	int port, cpu;
+	struct device_node *cpun;
 
 	/*
 	 * Port index look-up speeds up the function disabling ports by CPU,
@@ -141,18 +191,13 @@ static void __init cci_ace_init_ports(void)
 	 * The stashed index array is initialized for all possible CPUs
 	 * at probe time.
 	 */
-	for_each_child_of_node(cpus, cpun) {
-		if (of_node_cmp(cpun->type, "cpu"))
-			continue;
-		cell = of_get_property(cpun, "reg", NULL);
-		if (WARN(!cell, "%s: missing reg property\n", cpun->full_name))
+	for_each_possible_cpu(cpu) {
+		/* too early to use cpu->of_node */
+		cpun = of_get_cpu_node(cpu, NULL);
+
+		if (WARN(!cpun, "Missing cpu device node\n"))
 			continue;
 
-		hwid = of_read_number(cell, ac);
-		cpu = get_logical_index(hwid & MPIDR_HWID_BITMASK);
-
-		if (cpu < 0 || !cpu_possible(cpu))
-			continue;
 		port = __cci_ace_get_port(cpun, ACE_PORT);
 		if (port < 0)
 			continue;
@@ -294,7 +339,7 @@ asmlinkage void __naked cci_enable_port_for_self(void)
 
 	/* Enable the CCI port */
 "	ldr	r0, [r0, %[offsetof_port_phys]] \n"
-"	mov	r3, #"__stringify(CCI_ENABLE_REQ)" \n"
+"	mov	r3, %[cci_enable_req]\n"		   
 "	str	r3, [r0, #"__stringify(CCI_PORT_CTRL)"] \n"
 
 	/* poll the status reg for completion */
@@ -302,7 +347,7 @@ asmlinkage void __naked cci_enable_port_for_self(void)
 "	ldr	r0, [r1] \n"
 "	ldr	r0, [r0, r1]		@ cci_ctrl_base \n"
 "4:	ldr	r1, [r0, #"__stringify(CCI_CTRL_STATUS)"] \n"
-"	tst	r1, #1 \n"
+"	tst	r1, %[cci_control_status_bits] \n"			
 "	bne	4b \n"
 
 "	mov	r0, #0 \n"
@@ -315,6 +360,8 @@ asmlinkage void __naked cci_enable_port_for_self(void)
 "7:	.word	cci_ctrl_phys - . \n"
 	: :
 	[sizeof_cpu_port] "i" (sizeof(cpu_port)),
+	[cci_enable_req] "i" cpu_to_le32(CCI_ENABLE_REQ),
+	[cci_control_status_bits] "i" cpu_to_le32(1),
 #ifndef __ARMEB__
 	[offsetof_cpu_port_mpidr_lsb] "i" (offsetof(struct cpu_port, mpidr)),
 #else
@@ -324,8 +371,6 @@ asmlinkage void __naked cci_enable_port_for_self(void)
 	[sizeof_struct_cpu_port] "i" (sizeof(struct cpu_port)),
 	[sizeof_struct_ace_port] "i" (sizeof(struct cci_ace_port)),
 	[offsetof_port_phys] "i" (offsetof(struct cci_ace_port, phys)) );
-
-	unreachable();
 }
 
 /**
@@ -348,8 +393,8 @@ int notrace __cci_control_port_by_device(struct device_node *dn, bool enable)
 		return -ENODEV;
 
 	port = __cci_ace_get_port(dn, ACE_LITE_PORT);
-	if (WARN_ONCE(port < 0, "node %s ACE lite port look-up failure\n",
-				dn->full_name))
+	if (WARN_ONCE(port < 0, "node %pOF ACE lite port look-up failure\n",
+				dn))
 		return -ENODEV;
 	cci_port_control(port, enable);
 	return 0;
@@ -385,33 +430,20 @@ int notrace __cci_control_port_by_index(u32 port, bool enable)
 }
 EXPORT_SYMBOL_GPL(__cci_control_port_by_index);
 
-static const struct cci_nb_ports cci400_ports = {
-	.nb_ace = 2,
-	.nb_ace_lite = 3
-};
-
-static const struct of_device_id arm_cci_matches[] = {
-	{.compatible = "arm,cci-400", .data = &cci400_ports },
-	{},
-};
-
 static const struct of_device_id arm_cci_ctrl_if_matches[] = {
 	{.compatible = "arm,cci-400-ctrl-if", },
 	{},
 };
 
-static int __init cci_probe(void)
+static int cci_probe_ports(struct device_node *np)
 {
 	struct cci_nb_ports const *cci_config;
 	int ret, i, nb_ace = 0, nb_ace_lite = 0;
-	struct device_node *np, *cp;
+	struct device_node *cp;
 	struct resource res;
 	const char *match_str;
 	bool is_ace;
 
-	np = of_find_matching_node(NULL, arm_cci_matches);
-	if (!np)
-		return -ENODEV;
 
 	cci_config = of_match_node(arm_cci_matches, np)->data;
 	if (!cci_config)
@@ -419,22 +451,11 @@ static int __init cci_probe(void)
 
 	nb_cci_ports = cci_config->nb_ace + cci_config->nb_ace_lite;
 
-	ports = kcalloc(sizeof(*ports), nb_cci_ports, GFP_KERNEL);
+	ports = kcalloc(nb_cci_ports, sizeof(*ports), GFP_KERNEL);
 	if (!ports)
 		return -ENOMEM;
 
-	ret = of_address_to_resource(np, 0, &res);
-	if (!ret) {
-		cci_ctrl_base = ioremap(res.start, resource_size(&res));
-		cci_ctrl_phys =	res.start;
-	}
-	if (ret || !cci_ctrl_base) {
-		WARN(1, "unable to ioremap CCI ctrl\n");
-		ret = -ENXIO;
-		goto memalloc_err;
-	}
-
-	for_each_child_of_node(np, cp) {
+	for_each_available_child_of_node(np, cp) {
 		if (!of_match_node(arm_cci_ctrl_if_matches, cp))
 			continue;
 
@@ -445,14 +466,14 @@ static int __init cci_probe(void)
 
 		if (of_property_read_string(cp, "interface-type",
 					&match_str)) {
-			WARN(1, "node %s missing interface-type property\n",
-				  cp->full_name);
+			WARN(1, "node %pOF missing interface-type property\n",
+				  cp);
 			continue;
 		}
 		is_ace = strcmp(match_str, "ace") == 0;
 		if (!is_ace && strcmp(match_str, "ace-lite")) {
-			WARN(1, "node %s containing invalid interface-type property, skipping it\n",
-					cp->full_name);
+			WARN(1, "node %pOF containing invalid interface-type property, skipping it\n",
+					cp);
 			continue;
 		}
 
@@ -480,6 +501,13 @@ static int __init cci_probe(void)
 		ports[i].dn = cp;
 	}
 
+	/*
+	 * If there is no CCI port that is under kernel control
+	 * return early and report probe status.
+	 */
+	if (!nb_ace && !nb_ace_lite)
+		return -ENODEV;
+
 	 /* initialize a stashed array of ACE ports to speed-up look-up */
 	cci_ace_init_ports();
 
@@ -493,18 +521,43 @@ static int __init cci_probe(void)
 	sync_cache_w(&cpu_port);
 	__sync_cache_range_w(ports, sizeof(*ports) * nb_cci_ports);
 	pr_info("ARM CCI driver probed\n");
+
 	return 0;
+}
+#else /* !CONFIG_ARM_CCI400_PORT_CTRL */
+static inline int cci_probe_ports(struct device_node *np)
+{
+	return 0;
+}
+#endif /* CONFIG_ARM_CCI400_PORT_CTRL */
 
-memalloc_err:
+static int cci_probe(void)
+{
+	int ret;
+	struct device_node *np;
+	struct resource res;
 
-	kfree(ports);
-	return ret;
+	np = of_find_matching_node(NULL, arm_cci_matches);
+	if (!of_device_is_available(np))
+		return -ENODEV;
+
+	ret = of_address_to_resource(np, 0, &res);
+	if (!ret) {
+		cci_ctrl_base = ioremap(res.start, resource_size(&res));
+		cci_ctrl_phys =	res.start;
+	}
+	if (ret || !cci_ctrl_base) {
+		WARN(1, "unable to ioremap CCI ctrl\n");
+		return -ENXIO;
+	}
+
+	return cci_probe_ports(np);
 }
 
 static int cci_init_status = -EAGAIN;
 static DEFINE_MUTEX(cci_probing);
 
-static int __init cci_init(void)
+static int cci_init(void)
 {
 	if (cci_init_status != -EAGAIN)
 		return cci_init_status;
@@ -522,12 +575,13 @@ static int __init cci_init(void)
  * has been initialized, if not it calls the init function that probes
  * the driver and updates the return value.
  */
-bool __init cci_probed(void)
+bool cci_probed(void)
 {
 	return cci_init() == 0;
 }
 EXPORT_SYMBOL_GPL(cci_probed);
 
 early_initcall(cci_init);
+core_initcall(cci_platform_init);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ARM CCI support");

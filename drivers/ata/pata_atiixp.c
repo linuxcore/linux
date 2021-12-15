@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pata_atiixp.c 	- ATI PATA for new ATA layer
  *			  (C) 2005 Red Hat Inc
@@ -15,7 +16,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <scsi/scsi_host.h>
@@ -93,6 +93,7 @@ static int atiixp_prereset(struct ata_link *link, unsigned long deadline)
  *	atiixp_set_pio_timing	-	set initial PIO mode data
  *	@ap: ATA interface
  *	@adev: ATA device
+ *	@pio: Requested PIO
  *
  *	Called by both the pio and dma setup functions to set the controller
  *	timings for PIO transfers. We must load both the mode number and
@@ -184,8 +185,8 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 	 *	We must now look at the PIO mode situation. We may need to
 	 *	adjust the PIO mode to keep the timings acceptable
 	 */
-	 if (adev->dma_mode >= XFER_MW_DMA_2)
-	 	wanted_pio = 4;
+	if (adev->dma_mode >= XFER_MW_DMA_2)
+		wanted_pio = 4;
 	else if (adev->dma_mode == XFER_MW_DMA_1)
 		wanted_pio = 3;
 	else if (adev->dma_mode == XFER_MW_DMA_0)
@@ -227,7 +228,7 @@ static void atiixp_bmdma_start(struct ata_queued_cmd *qc)
 }
 
 /**
- *	atiixp_dma_stop	-	DMA stop callback
+ *	atiixp_bmdma_stop	-	DMA stop callback
  *	@qc: Command in progress
  *
  *	DMA has completed. Clear the UDMA flag as the next operations will
@@ -251,8 +252,9 @@ static void atiixp_bmdma_stop(struct ata_queued_cmd *qc)
 }
 
 static struct scsi_host_template atiixp_sht = {
-	ATA_BMDMA_SHT(DRV_NAME),
+	ATA_BASE_SHT(DRV_NAME),
 	.sg_tablesize		= LIBATA_DUMB_MAX_PRD,
+	.dma_boundary		= ATA_DMA_BOUNDARY,
 };
 
 static struct ata_port_operations atiixp_port_ops = {
@@ -279,6 +281,10 @@ static int atiixp_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	};
 	const struct ata_port_info *ppi[] = { &info, &info };
 
+	/* SB600 doesn't have secondary port wired */
+	if (pdev->device == PCI_DEVICE_ID_ATI_IXP600_IDE)
+		ppi[1] = &ata_dummy_port_info;
+
 	return ata_pci_bmdma_init_one(pdev, ppi, &atiixp_sht, NULL,
 				      ATA_HOST_PARALLEL_SCAN);
 }
@@ -299,7 +305,7 @@ static struct pci_driver atiixp_pci_driver = {
 	.id_table	= atiixp,
 	.probe 		= atiixp_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.resume		= ata_pci_device_resume,
 	.suspend	= ata_pci_device_suspend,
 #endif

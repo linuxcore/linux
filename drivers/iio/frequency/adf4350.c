@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ADF4350/ADF4351 SPI Wideband Synthesizer driver
  *
  * Copyright 2012-2013 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/device.h>
@@ -15,11 +14,10 @@
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/gcd.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <asm/div64.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -35,6 +33,7 @@ enum {
 struct adf4350_state {
 	struct spi_device		*spi;
 	struct regulator		*reg;
+	struct gpio_desc		*lock_detect_gpiod;
 	struct adf4350_platform_data	*pdata;
 	struct clk			*clk;
 	unsigned long			clkin;
@@ -49,6 +48,13 @@ struct adf4350_state {
 	unsigned long			regs_hw[6];
 	unsigned long long		freq_req;
 	/*
+	 * Lock to protect the state of the device from potential concurrent
+	 * writes. The device is configured via a sequence of SPI writes,
+	 * and this lock is meant to prevent the start of another sequence
+	 * before another one has finished.
+	 */
+	struct mutex			lock;
+	/*
 	 * DMA (thus cache coherency maintenance) requires the
 	 * transfer buffers to live in their own cache lines.
 	 */
@@ -62,7 +68,6 @@ static struct adf4350_platform_data default_pdata = {
 	.r3_user_settings = ADF4350_REG3_12BIT_CLKDIV_MODE(0),
 	.r4_user_settings = ADF4350_REG4_OUTPUT_PWR(3) |
 			    ADF4350_REG4_MUTE_TILL_LOCK_EN,
-	.gpio_lock_detect = -1,
 };
 
 static int adf4350_sync_config(struct adf4350_state *st)
@@ -72,7 +77,6 @@ static int adf4350_sync_config(struct adf4350_state *st)
 	for (i = ADF4350_REG5; i >= ADF4350_REG0; i--) {
 		if ((st->regs_hw[i] != st->regs[i]) ||
 			((i == ADF4350_REG0) && doublebuf)) {
-
 			switch (i) {
 			case ADF4350_REG1:
 			case ADF4350_REG4:
@@ -102,7 +106,7 @@ static int adf4350_reg_access(struct iio_dev *indio_dev,
 	if (reg > ADF4350_REG5)
 		return -EINVAL;
 
-	mutex_lock(&indio_dev->mlock);
+	mutex_lock(&st->lock);
 	if (readval == NULL) {
 		st->regs[reg] = writeval & ~(BIT(0) | BIT(1) | BIT(2));
 		ret = adf4350_sync_config(st);
@@ -110,7 +114,7 @@ static int adf4350_reg_access(struct iio_dev *indio_dev,
 		*readval =  st->regs_hw[reg];
 		ret = 0;
 	}
-	mutex_unlock(&indio_dev->mlock);
+	mutex_unlock(&st->lock);
 
 	return ret;
 }
@@ -257,7 +261,7 @@ static ssize_t adf4350_write(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
-	mutex_lock(&indio_dev->mlock);
+	mutex_lock(&st->lock);
 	switch ((u32)private) {
 	case ADF4350_FREQ:
 		ret = adf4350_set_freq(st, readin);
@@ -298,7 +302,7 @@ static ssize_t adf4350_write(struct iio_dev *indio_dev,
 	default:
 		ret = -EINVAL;
 	}
-	mutex_unlock(&indio_dev->mlock);
+	mutex_unlock(&st->lock);
 
 	return ret ? ret : len;
 }
@@ -312,15 +316,15 @@ static ssize_t adf4350_read(struct iio_dev *indio_dev,
 	unsigned long long val;
 	int ret = 0;
 
-	mutex_lock(&indio_dev->mlock);
+	mutex_lock(&st->lock);
 	switch ((u32)private) {
 	case ADF4350_FREQ:
 		val = (u64)((st->r0_int * st->r1_mod) + st->r0_fract) *
 			(u64)st->fpfd;
 		do_div(val, st->r1_mod * (1 << st->r4_rf_div_sel));
 		/* PLL unlocked? return error */
-		if (gpio_is_valid(st->pdata->gpio_lock_detect))
-			if (!gpio_get_value(st->pdata->gpio_lock_detect)) {
+		if (st->lock_detect_gpiod)
+			if (!gpiod_get_value(st->lock_detect_gpiod)) {
 				dev_dbg(&st->spi->dev, "PLL un-locked\n");
 				ret = -EBUSY;
 			}
@@ -341,7 +345,7 @@ static ssize_t adf4350_read(struct iio_dev *indio_dev,
 		ret = -EINVAL;
 		val = 0;
 	}
-	mutex_unlock(&indio_dev->mlock);
+	mutex_unlock(&st->lock);
 
 	return ret < 0 ? ret : sprintf(buf, "%llu\n", val);
 }
@@ -351,6 +355,7 @@ static ssize_t adf4350_read(struct iio_dev *indio_dev,
 	.read = adf4350_read, \
 	.write = adf4350_write, \
 	.private = _ident, \
+	.shared = IIO_SEPARATE, \
 }
 
 static const struct iio_chan_spec_ext_info adf4350_ext_info[] = {
@@ -374,7 +379,6 @@ static const struct iio_chan_spec adf4350_chan = {
 
 static const struct iio_info adf4350_info = {
 	.debugfs_reg_access = &adf4350_reg_access,
-	.driver_module = THIS_MODULE,
 };
 
 #ifdef CONFIG_OF
@@ -383,15 +387,12 @@ static struct adf4350_platform_data *adf4350_parse_dt(struct device *dev)
 	struct device_node *np = dev->of_node;
 	struct adf4350_platform_data *pdata;
 	unsigned int tmp;
-	int ret;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata) {
-		dev_err(dev, "could not allocate memory for platform data\n");
+	if (!pdata)
 		return NULL;
-	}
 
-	strncpy(&pdata->name[0], np->name, SPI_NAME_SIZE - 1);
+	snprintf(&pdata->name[0], SPI_NAME_SIZE - 1, "%pOFn", np);
 
 	tmp = 10000;
 	of_property_read_u32(np, "adi,channel-spacing", &tmp);
@@ -404,12 +405,6 @@ static struct adf4350_platform_data *adf4350_parse_dt(struct device *dev)
 	tmp = 0;
 	of_property_read_u32(np, "adi,reference-div-factor", &tmp);
 	pdata->ref_div_factor = tmp;
-
-	ret = of_get_gpio(np, 0);
-	if (ret < 0)
-		pdata->gpio_lock_detect = -1;
-	else
-		pdata->gpio_lock_detect = ret;
 
 	pdata->ref_doubler_en = of_property_read_bool(np,
 			"adi,reference-doubler-enable");
@@ -515,7 +510,7 @@ static int adf4350_probe(struct spi_device *spi)
 	}
 
 	if (!pdata->clkin) {
-		clk = clk_get(&spi->dev, "clkin");
+		clk = devm_clk_get(&spi->dev, "clkin");
 		if (IS_ERR(clk))
 			return -EPROBE_DEFER;
 
@@ -524,24 +519,25 @@ static int adf4350_probe(struct spi_device *spi)
 			return ret;
 	}
 
-	indio_dev = iio_device_alloc(sizeof(*st));
-	if (indio_dev == NULL)
-		return -ENOMEM;
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	if (indio_dev == NULL) {
+		ret =  -ENOMEM;
+		goto error_disable_clk;
+	}
 
 	st = iio_priv(indio_dev);
 
-	st->reg = regulator_get(&spi->dev, "vcc");
+	st->reg = devm_regulator_get(&spi->dev, "vcc");
 	if (!IS_ERR(st->reg)) {
 		ret = regulator_enable(st->reg);
 		if (ret)
-			goto error_put_reg;
+			goto error_disable_clk;
 	}
 
 	spi_set_drvdata(spi, indio_dev);
 	st->spi = spi;
 	st->pdata = pdata;
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = (pdata->name[0] != 0) ? pdata->name :
 		spi_get_device_id(spi)->name;
 
@@ -549,6 +545,8 @@ static int adf4350_probe(struct spi_device *spi)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = &adf4350_chan;
 	indio_dev->num_channels = 1;
+
+	mutex_init(&st->lock);
 
 	st->chspc = pdata->channel_spacing;
 	if (clk) {
@@ -563,42 +561,30 @@ static int adf4350_probe(struct spi_device *spi)
 
 	memset(st->regs_hw, 0xFF, sizeof(st->regs_hw));
 
-	if (gpio_is_valid(pdata->gpio_lock_detect)) {
-		ret = gpio_request(pdata->gpio_lock_detect, indio_dev->name);
-		if (ret) {
-			dev_err(&spi->dev, "fail to request lock detect GPIO-%d",
-				pdata->gpio_lock_detect);
-			goto error_disable_reg;
-		}
-		gpio_direction_input(pdata->gpio_lock_detect);
+	st->lock_detect_gpiod = devm_gpiod_get_optional(&spi->dev, NULL,
+							GPIOD_IN);
+	if (IS_ERR(st->lock_detect_gpiod)) {
+		ret = PTR_ERR(st->lock_detect_gpiod);
+		goto error_disable_reg;
 	}
 
 	if (pdata->power_up_frequency) {
 		ret = adf4350_set_freq(st, pdata->power_up_frequency);
 		if (ret)
-			goto error_free_gpio;
+			goto error_disable_reg;
 	}
 
 	ret = iio_device_register(indio_dev);
 	if (ret)
-		goto error_free_gpio;
+		goto error_disable_reg;
 
 	return 0;
-
-error_free_gpio:
-	if (gpio_is_valid(pdata->gpio_lock_detect))
-		gpio_free(pdata->gpio_lock_detect);
 
 error_disable_reg:
 	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
-error_put_reg:
-	if (!IS_ERR(st->reg))
-		regulator_put(st->reg);
-
-	if (clk)
-		clk_disable_unprepare(clk);
-	iio_device_free(indio_dev);
+error_disable_clk:
+	clk_disable_unprepare(clk);
 
 	return ret;
 }
@@ -614,32 +600,32 @@ static int adf4350_remove(struct spi_device *spi)
 
 	iio_device_unregister(indio_dev);
 
-	if (st->clk)
-		clk_disable_unprepare(st->clk);
+	clk_disable_unprepare(st->clk);
 
-	if (!IS_ERR(reg)) {
+	if (!IS_ERR(reg))
 		regulator_disable(reg);
-		regulator_put(reg);
-	}
-
-	if (gpio_is_valid(st->pdata->gpio_lock_detect))
-		gpio_free(st->pdata->gpio_lock_detect);
-
-	iio_device_free(indio_dev);
 
 	return 0;
 }
+
+static const struct of_device_id adf4350_of_match[] = {
+	{ .compatible = "adi,adf4350", },
+	{ .compatible = "adi,adf4351", },
+	{ /* sentinel */ },
+};
+MODULE_DEVICE_TABLE(of, adf4350_of_match);
 
 static const struct spi_device_id adf4350_id[] = {
 	{"adf4350", 4350},
 	{"adf4351", 4351},
 	{}
 };
+MODULE_DEVICE_TABLE(spi, adf4350_id);
 
 static struct spi_driver adf4350_driver = {
 	.driver = {
 		.name	= "adf4350",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(adf4350_of_match),
 	},
 	.probe		= adf4350_probe,
 	.remove		= adf4350_remove,

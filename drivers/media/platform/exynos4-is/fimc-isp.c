@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Samsung EXYNOS4x12 FIMC-IS (Imaging Subsystem) driver
  *
@@ -5,10 +6,6 @@
  *
  * Authors: Sylwester Nawrocki <s.nawrocki@samsung.com>
  *          Younghwan Joo <yhwan.joo@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) "%s:%d " fmt, __func__, __LINE__
 
@@ -25,6 +22,7 @@
 #include <media/v4l2-device.h>
 
 #include "media-dev.h"
+#include "fimc-isp-video.h"
 #include "fimc-is-command.h"
 #include "fimc-is-param.h"
 #include "fimc-is-regs.h"
@@ -35,26 +33,23 @@ module_param_named(debug_isp, fimc_isp_debug, int, S_IRUGO | S_IWUSR);
 
 static const struct fimc_fmt fimc_isp_formats[FIMC_ISP_NUM_FORMATS] = {
 	{
-		.name		= "RAW8 (GRBG)",
 		.fourcc		= V4L2_PIX_FMT_SGRBG8,
 		.depth		= { 8 },
 		.color		= FIMC_FMT_RAW8,
 		.memplanes	= 1,
-		.mbus_code	= V4L2_MBUS_FMT_SGRBG8_1X8,
+		.mbus_code	= MEDIA_BUS_FMT_SGRBG8_1X8,
 	}, {
-		.name		= "RAW10 (GRBG)",
 		.fourcc		= V4L2_PIX_FMT_SGRBG10,
 		.depth		= { 10 },
 		.color		= FIMC_FMT_RAW10,
 		.memplanes	= 1,
-		.mbus_code	= V4L2_MBUS_FMT_SGRBG10_1X10,
+		.mbus_code	= MEDIA_BUS_FMT_SGRBG10_1X10,
 	}, {
-		.name		= "RAW12 (GRBG)",
 		.fourcc		= V4L2_PIX_FMT_SGRBG12,
 		.depth		= { 12 },
 		.color		= FIMC_FMT_RAW12,
 		.memplanes	= 1,
-		.mbus_code	= V4L2_MBUS_FMT_SGRBG12_1X12,
+		.mbus_code	= MEDIA_BUS_FMT_SGRBG12_1X12,
 	},
 };
 
@@ -93,8 +88,8 @@ void fimc_isp_irq_handler(struct fimc_is *is)
 	is->i2h_cmd.args[1] = mcuctl_read(is, MCUCTL_REG_ISSR(21));
 
 	fimc_is_fw_clear_irq1(is, FIMC_IS_INT_FRAME_DONE_ISP);
+	fimc_isp_video_irq_handler(is);
 
-	/* TODO: Complete ISP DMA interrupt handler */
 	wake_up(&is->irq_queue);
 }
 
@@ -111,7 +106,7 @@ static const struct media_entity_operations fimc_is_subdev_media_ops = {
 };
 
 static int fimc_is_subdev_enum_mbus_code(struct v4l2_subdev *sd,
-				struct v4l2_subdev_fh *fh,
+				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_mbus_code_enum *code)
 {
 	const struct fimc_fmt *fmt;
@@ -124,14 +119,14 @@ static int fimc_is_subdev_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int fimc_isp_subdev_get_fmt(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_fh *fh,
+				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *fmt)
 {
 	struct fimc_isp *isp = v4l2_get_subdevdata(sd);
 	struct v4l2_mbus_framefmt *mf = &fmt->format;
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		*mf = *v4l2_subdev_get_try_format(fh, fmt->pad);
+		*mf = *v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		return 0;
 	}
 
@@ -148,7 +143,7 @@ static int fimc_isp_subdev_get_fmt(struct v4l2_subdev *sd,
 
 		if (fmt->pad == FIMC_ISP_SD_PAD_SRC_FIFO) {
 			mf->colorspace = V4L2_COLORSPACE_JPEG;
-			mf->code = V4L2_MBUS_FMT_YUV10_1X30;
+			mf->code = MEDIA_BUS_FMT_YUV10_1X30;
 		}
 	}
 
@@ -161,7 +156,7 @@ static int fimc_isp_subdev_get_fmt(struct v4l2_subdev *sd,
 }
 
 static void __isp_subdev_try_format(struct fimc_isp *isp,
-				    struct v4l2_subdev_fh *fh,
+				    struct v4l2_subdev_state *sd_state,
 				    struct v4l2_subdev_format *fmt)
 {
 	struct v4l2_mbus_framefmt *mf = &fmt->format;
@@ -174,11 +169,12 @@ static void __isp_subdev_try_format(struct fimc_isp *isp,
 				FIMC_ISP_SINK_WIDTH_MAX, 0,
 				&mf->height, FIMC_ISP_SINK_HEIGHT_MIN,
 				FIMC_ISP_SINK_HEIGHT_MAX, 0, 0);
-		mf->code = V4L2_MBUS_FMT_SGRBG10_1X10;
+		mf->code = MEDIA_BUS_FMT_SGRBG10_1X10;
 	} else {
 		if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-			format = v4l2_subdev_get_try_format(fh,
-						FIMC_ISP_SD_PAD_SINK);
+			format = v4l2_subdev_get_try_format(&isp->subdev,
+							    sd_state,
+							    FIMC_ISP_SD_PAD_SINK);
 		else
 			format = &isp->sink_fmt;
 
@@ -187,7 +183,7 @@ static void __isp_subdev_try_format(struct fimc_isp *isp,
 		mf->height = format->height - FIMC_ISP_CAC_MARGIN_HEIGHT;
 
 		if (fmt->pad == FIMC_ISP_SD_PAD_SRC_FIFO) {
-			mf->code = V4L2_MBUS_FMT_YUV10_1X30;
+			mf->code = MEDIA_BUS_FMT_YUV10_1X30;
 			mf->colorspace = V4L2_COLORSPACE_JPEG;
 		} else {
 			mf->code = format->code;
@@ -196,7 +192,7 @@ static void __isp_subdev_try_format(struct fimc_isp *isp,
 }
 
 static int fimc_isp_subdev_set_fmt(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_fh *fh,
+				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *fmt)
 {
 	struct fimc_isp *isp = v4l2_get_subdevdata(sd);
@@ -208,10 +204,10 @@ static int fimc_isp_subdev_set_fmt(struct v4l2_subdev *sd,
 		 __func__, fmt->pad, mf->code, mf->width, mf->height);
 
 	mutex_lock(&isp->subdev_lock);
-	__isp_subdev_try_format(isp, fh, fmt);
+	__isp_subdev_try_format(isp, sd_state, fmt);
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		mf = v4l2_subdev_get_try_format(fh, fmt->pad);
+		mf = v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		*mf = fmt->format;
 
 		/* Propagate format to the source pads */
@@ -222,8 +218,10 @@ static int fimc_isp_subdev_set_fmt(struct v4l2_subdev *sd,
 			for (pad = FIMC_ISP_SD_PAD_SRC_FIFO;
 					pad < FIMC_ISP_SD_PADS_NUM; pad++) {
 				format.pad = pad;
-				__isp_subdev_try_format(isp, fh, &format);
-				mf = v4l2_subdev_get_try_format(fh, pad);
+				__isp_subdev_try_format(isp, sd_state,
+							&format);
+				mf = v4l2_subdev_get_try_format(sd, sd_state,
+								pad);
 				*mf = format.format;
 			}
 		}
@@ -235,7 +233,8 @@ static int fimc_isp_subdev_set_fmt(struct v4l2_subdev *sd,
 				isp->sink_fmt = *mf;
 
 				format.pad = FIMC_ISP_SD_PAD_SRC_DMA;
-				__isp_subdev_try_format(isp, fh, &format);
+				__isp_subdev_try_format(isp, sd_state,
+							&format);
 
 				isp->src_fmt = format.format;
 				__is_set_frame_size(is, &isp->src_fmt);
@@ -309,9 +308,10 @@ static int fimc_isp_subdev_s_power(struct v4l2_subdev *sd, int on)
 	pr_debug("on: %d\n", on);
 
 	if (on) {
-		ret = pm_runtime_get_sync(&is->pdev->dev);
+		ret = pm_runtime_resume_and_get(&is->pdev->dev);
 		if (ret < 0)
 			return ret;
+
 		set_bit(IS_ST_PWR_ON, &is->state);
 
 		ret = fimc_is_start_firmware(is);
@@ -365,30 +365,59 @@ static int fimc_isp_subdev_s_power(struct v4l2_subdev *sd, int on)
 static int fimc_isp_subdev_open(struct v4l2_subdev *sd,
 				struct v4l2_subdev_fh *fh)
 {
-	struct v4l2_mbus_framefmt fmt;
 	struct v4l2_mbus_framefmt *format;
+	struct v4l2_mbus_framefmt fmt = {
+		.colorspace = V4L2_COLORSPACE_SRGB,
+		.code = fimc_isp_formats[0].mbus_code,
+		.width = DEFAULT_PREVIEW_STILL_WIDTH + FIMC_ISP_CAC_MARGIN_WIDTH,
+		.height = DEFAULT_PREVIEW_STILL_HEIGHT + FIMC_ISP_CAC_MARGIN_HEIGHT,
+		.field = V4L2_FIELD_NONE,
+	};
 
-	format = v4l2_subdev_get_try_format(fh, FIMC_ISP_SD_PAD_SINK);
-
-	fmt.colorspace = V4L2_COLORSPACE_SRGB;
-	fmt.code = fimc_isp_formats[0].mbus_code;
-	fmt.width = DEFAULT_PREVIEW_STILL_WIDTH + FIMC_ISP_CAC_MARGIN_WIDTH;
-	fmt.height = DEFAULT_PREVIEW_STILL_HEIGHT + FIMC_ISP_CAC_MARGIN_HEIGHT;
-	fmt.field = V4L2_FIELD_NONE;
+	format = v4l2_subdev_get_try_format(sd, fh->state,
+					    FIMC_ISP_SD_PAD_SINK);
 	*format = fmt;
 
-	format = v4l2_subdev_get_try_format(fh, FIMC_ISP_SD_PAD_SRC_FIFO);
+	format = v4l2_subdev_get_try_format(sd, fh->state,
+					    FIMC_ISP_SD_PAD_SRC_FIFO);
 	fmt.width = DEFAULT_PREVIEW_STILL_WIDTH;
 	fmt.height = DEFAULT_PREVIEW_STILL_HEIGHT;
 	*format = fmt;
 
-	format = v4l2_subdev_get_try_format(fh, FIMC_ISP_SD_PAD_SRC_DMA);
+	format = v4l2_subdev_get_try_format(sd, fh->state,
+					    FIMC_ISP_SD_PAD_SRC_DMA);
 	*format = fmt;
 
 	return 0;
 }
 
+static int fimc_isp_subdev_registered(struct v4l2_subdev *sd)
+{
+	struct fimc_isp *isp = v4l2_get_subdevdata(sd);
+	int ret;
+
+	/* Use pipeline object allocated by the media device. */
+	isp->video_capture.ve.pipe = v4l2_get_subdev_hostdata(sd);
+
+	ret = fimc_isp_video_device_register(isp, sd->v4l2_dev,
+			V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	if (ret < 0)
+		isp->video_capture.ve.pipe = NULL;
+
+	return ret;
+}
+
+static void fimc_isp_subdev_unregistered(struct v4l2_subdev *sd)
+{
+	struct fimc_isp *isp = v4l2_get_subdevdata(sd);
+
+	fimc_isp_video_device_unregister(isp,
+			V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+}
+
 static const struct v4l2_subdev_internal_ops fimc_is_subdev_internal_ops = {
+	.registered = fimc_isp_subdev_registered,
+	.unregistered = fimc_isp_subdev_unregistered,
 	.open = fimc_isp_subdev_open,
 };
 
@@ -406,7 +435,7 @@ static const struct v4l2_subdev_core_ops fimc_is_core_ops = {
 	.s_power = fimc_isp_subdev_s_power,
 };
 
-static struct v4l2_subdev_ops fimc_is_subdev_ops = {
+static const struct v4l2_subdev_ops fimc_is_subdev_ops = {
 	.core = &fimc_is_core_ops,
 	.video = &fimc_is_subdev_video_ops,
 	.pad = &fimc_is_subdev_pad_ops,
@@ -511,7 +540,7 @@ static int __ctrl_set_metering(struct fimc_is *is, unsigned int value)
 		break;
 	default:
 		return -EINVAL;
-	};
+	}
 
 	__is_set_isp_metering(is, IS_METERING_CONFIG_CMD, val);
 	return 0;
@@ -653,11 +682,11 @@ static void __isp_subdev_set_default_format(struct fimc_isp *isp)
 				FIMC_ISP_CAC_MARGIN_WIDTH;
 	isp->sink_fmt.height = DEFAULT_PREVIEW_STILL_HEIGHT +
 				FIMC_ISP_CAC_MARGIN_HEIGHT;
-	isp->sink_fmt.code = V4L2_MBUS_FMT_SGRBG10_1X10;
+	isp->sink_fmt.code = MEDIA_BUS_FMT_SGRBG10_1X10;
 
 	isp->src_fmt.width = DEFAULT_PREVIEW_STILL_WIDTH;
 	isp->src_fmt.height = DEFAULT_PREVIEW_STILL_HEIGHT;
-	isp->src_fmt.code = V4L2_MBUS_FMT_SGRBG10_1X10;
+	isp->src_fmt.code = MEDIA_BUS_FMT_SGRBG10_1X10;
 	__is_set_frame_size(is, &isp->src_fmt);
 }
 
@@ -672,15 +701,18 @@ int fimc_isp_subdev_create(struct fimc_isp *isp)
 	mutex_init(&isp->subdev_lock);
 
 	v4l2_subdev_init(sd, &fimc_is_subdev_ops);
+
+	sd->owner = THIS_MODULE;
 	sd->grp_id = GRP_ID_FIMC_IS;
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
 	snprintf(sd->name, sizeof(sd->name), "FIMC-IS-ISP");
 
+	sd->entity.function = MEDIA_ENT_F_PROC_VIDEO_PIXEL_FORMATTER;
 	isp->subdev_pads[FIMC_ISP_SD_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	isp->subdev_pads[FIMC_ISP_SD_PAD_SRC_FIFO].flags = MEDIA_PAD_FL_SOURCE;
 	isp->subdev_pads[FIMC_ISP_SD_PAD_SRC_DMA].flags = MEDIA_PAD_FL_SOURCE;
-	ret = media_entity_init(&sd->entity, FIMC_ISP_SD_PADS_NUM,
-				isp->subdev_pads, 0);
+	ret = media_entity_pads_init(&sd->entity, FIMC_ISP_SD_PADS_NUM,
+				isp->subdev_pads);
 	if (ret)
 		return ret;
 

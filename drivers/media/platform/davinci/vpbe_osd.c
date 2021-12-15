@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2007-2010 Texas Instruments Inc
  * Copyright (C) 2007 MontaVista Software, Inc.
@@ -6,30 +7,14 @@
  * - Initial version
  * Murali Karicheri (mkaricheri@gmail.com), Texas Instruments Ltd.
  * - ported to sub device interface
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation version 2.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/slab.h>
-
-#include <mach/cputype.h>
-#include <mach/hardware.h>
 
 #include <media/davinci/vpss.h>
 #include <media/v4l2-device.h>
@@ -41,7 +26,7 @@
 
 #define MODULE_NAME	"davinci-vpbe-osd"
 
-static struct platform_device_id vpbe_osd_devtype[] = {
+static const struct platform_device_id vpbe_osd_devtype[] = {
 	{
 		.name = DM644X_VPBE_OSD_SUBDEV_NAME,
 		.driver_data = VPBE_VERSION_1,
@@ -126,10 +111,10 @@ static inline u32 osd_modify(struct osd_state *sd, u32 mask, u32 val,
 
 /**
  * _osd_dm6446_vid0_pingpong() - field inversion fix for DM6446
- * @sd - ptr to struct osd_state
- * @field_inversion - inversion flag
- * @fb_base_phys - frame buffer address
- * @lconfig - ptr to layer config
+ * @sd: ptr to struct osd_state
+ * @field_inversion: inversion flag
+ * @fb_base_phys: frame buffer address
+ * @lconfig: ptr to layer config
  *
  * This routine implements a workaround for the field signal inversion silicon
  * erratum described in Advisory 1.3.8 for the DM6446.  The fb_base_phys and
@@ -786,9 +771,9 @@ static void osd_get_layer_config(struct osd_state *sd, enum osd_layer layer,
 
 /**
  * try_layer_config() - Try a specific configuration for the layer
- * @sd  - ptr to struct osd_state
- * @layer - layer to configure
- * @lconfig - layer configuration to try
+ * @sd: ptr to struct osd_state
+ * @layer: layer to configure
+ * @lconfig: layer configuration to try
  *
  * If the requested lconfig is completely rejected and the value of lconfig on
  * exit is the current lconfig, then try_layer_config() returns 1.  Otherwise,
@@ -848,9 +833,10 @@ static int try_layer_config(struct osd_state *sd, enum osd_layer layer,
 
 	/* DM6446: */
 	/* only one OSD window at a time can use RGB pixel formats */
-	  if ((osd->vpbe_type == VPBE_VERSION_1) &&
-		  is_osd_win(layer) && is_rgb_pixfmt(lconfig->pixfmt)) {
+	if ((osd->vpbe_type == VPBE_VERSION_1) &&
+	    is_osd_win(layer) && is_rgb_pixfmt(lconfig->pixfmt)) {
 		enum osd_pix_format pixfmt;
+
 		if (layer == WIN_OSD0)
 			pixfmt = osd->win[WIN_OSD1].lconfig.pixfmt;
 		else
@@ -1547,61 +1533,36 @@ static int osd_probe(struct platform_device *pdev)
 	const struct platform_device_id *pdev_id;
 	struct osd_state *osd;
 	struct resource *res;
-	int ret = 0;
 
-	osd = kzalloc(sizeof(struct osd_state), GFP_KERNEL);
+	pdev_id = platform_get_device_id(pdev);
+	if (!pdev_id)
+		return -EINVAL;
+
+	osd = devm_kzalloc(&pdev->dev, sizeof(struct osd_state), GFP_KERNEL);
 	if (osd == NULL)
 		return -ENOMEM;
 
-	pdev_id = platform_get_device_id(pdev);
-	if (!pdev_id) {
-		ret = -EINVAL;
-		goto free_mem;
-	}
 
 	osd->dev = &pdev->dev;
 	osd->vpbe_type = pdev_id->driver_data;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(osd->dev, "Unable to get OSD register address map\n");
-		ret = -ENODEV;
-		goto free_mem;
-	}
+	osd->osd_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(osd->osd_base))
+		return PTR_ERR(osd->osd_base);
+
 	osd->osd_base_phys = res->start;
 	osd->osd_size = resource_size(res);
-	if (!request_mem_region(osd->osd_base_phys, osd->osd_size,
-				MODULE_NAME)) {
-		dev_err(osd->dev, "Unable to reserve OSD MMIO region\n");
-		ret = -ENODEV;
-		goto free_mem;
-	}
-	osd->osd_base = ioremap_nocache(res->start, osd->osd_size);
-	if (!osd->osd_base) {
-		dev_err(osd->dev, "Unable to map the OSD region\n");
-		ret = -ENODEV;
-		goto release_mem_region;
-	}
 	spin_lock_init(&osd->lock);
 	osd->ops = osd_ops;
 	platform_set_drvdata(pdev, osd);
 	dev_notice(osd->dev, "OSD sub device probe success\n");
-	return ret;
 
-release_mem_region:
-	release_mem_region(osd->osd_base_phys, osd->osd_size);
-free_mem:
-	kfree(osd);
-	return ret;
+	return 0;
 }
 
 static int osd_remove(struct platform_device *pdev)
 {
-	struct osd_state *osd = platform_get_drvdata(pdev);
-
-	iounmap((void *)osd->osd_base);
-	release_mem_region(osd->osd_base_phys, osd->osd_size);
-	kfree(osd);
 	return 0;
 }
 
@@ -1610,7 +1571,6 @@ static struct platform_driver osd_driver = {
 	.remove		= osd_remove,
 	.driver		= {
 		.name	= MODULE_NAME,
-		.owner	= THIS_MODULE,
 	},
 	.id_table	= vpbe_osd_devtype
 };

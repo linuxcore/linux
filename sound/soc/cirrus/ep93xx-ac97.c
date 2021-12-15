@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ASoC driver for Cirrus Logic EP93xx AC97 controller.
  *
  * Copyright (c) 2010 Mika Westerberg
  *
  * Based on s3c-ac97 ASoC driver by Jaswinder Singh.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -19,10 +16,14 @@
 #include <linux/slab.h>
 
 #include <sound/core.h>
+#include <sound/dmaengine_pcm.h>
 #include <sound/ac97_codec.h>
 #include <sound/soc.h>
 
 #include <linux/platform_data/dma-ep93xx.h>
+#include <linux/soc/cirrus/ep93xx.h>
+
+#include "ep93xx-pcm.h"
 
 /*
  * Per channel (1-4) registers.
@@ -95,6 +96,8 @@ struct ep93xx_ac97_info {
 	struct device		*dev;
 	void __iomem		*regs;
 	struct completion	done;
+	struct snd_dmaengine_dai_dma_data dma_params_rx;
+	struct snd_dmaengine_dai_dma_data dma_params_tx;
 };
 
 /* currently ALSA only supports a single AC97 device */
@@ -282,7 +285,7 @@ static int ep93xx_ac97_trigger(struct snd_pcm_substream *substream,
 			/*
 			 * As per Cirrus EP93xx errata described below:
 			 *
-			 * http://www.cirrus.com/en/pubs/errata/ER667E2B.pdf
+			 * https://www.cirrus.com/en/pubs/errata/ER667E2B.pdf
 			 *
 			 * we will wait for the TX FIFO to be empty before
 			 * clearing the TEN bit.
@@ -315,8 +318,13 @@ static int ep93xx_ac97_trigger(struct snd_pcm_substream *substream,
 
 static int ep93xx_ac97_dai_probe(struct snd_soc_dai *dai)
 {
-	dai->playback_dma_data = &ep93xx_ac97_pcm_out;
-	dai->capture_dma_data = &ep93xx_ac97_pcm_in;
+	struct ep93xx_ac97_info *info = snd_soc_dai_get_drvdata(dai);
+
+	info->dma_params_tx.filter_data = &ep93xx_ac97_pcm_out;
+	info->dma_params_rx.filter_data = &ep93xx_ac97_pcm_in;
+
+	dai->playback_dma_data = &info->dma_params_tx;
+	dai->capture_dma_data = &info->dma_params_rx;
 
 	return 0;
 }
@@ -328,7 +336,6 @@ static const struct snd_soc_dai_ops ep93xx_ac97_dai_ops = {
 static struct snd_soc_dai_driver ep93xx_ac97_dai = {
 	.name		= "ep93xx-ac97",
 	.id		= 0,
-	.ac97_control	= 1,
 	.probe		= ep93xx_ac97_dai_probe,
 	.playback	= {
 		.stream_name	= "AC97 Playback",
@@ -354,25 +361,20 @@ static const struct snd_soc_component_driver ep93xx_ac97_component = {
 static int ep93xx_ac97_probe(struct platform_device *pdev)
 {
 	struct ep93xx_ac97_info *info;
-	struct resource *res;
-	unsigned int irq;
+	int irq;
 	int ret;
 
 	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -ENODEV;
-
-	info->regs = devm_ioremap_resource(&pdev->dev, res);
+	info->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(info->regs))
 		return PTR_ERR(info->regs);
 
 	irq = platform_get_irq(pdev, 0);
-	if (!irq)
-		return -ENODEV;
+	if (irq <= 0)
+		return irq < 0 ? irq : -ENODEV;
 
 	ret = devm_request_irq(&pdev->dev, irq, ep93xx_ac97_interrupt,
 			       IRQF_TRIGGER_HIGH, pdev->name, info);
@@ -397,8 +399,14 @@ static int ep93xx_ac97_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
+	ret = devm_ep93xx_pcm_platform_register(&pdev->dev);
+	if (ret)
+		goto fail_unregister;
+
 	return 0;
 
+fail_unregister:
+	snd_soc_unregister_component(&pdev->dev);
 fail:
 	ep93xx_ac97_info = NULL;
 	snd_soc_set_ac97_ops(NULL);
@@ -426,7 +434,6 @@ static struct platform_driver ep93xx_ac97_driver = {
 	.remove	= ep93xx_ac97_remove,
 	.driver = {
 		.name = "ep93xx-ac97",
-		.owner = THIS_MODULE,
 	},
 };
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_PROFILE_H
 #define _LINUX_PROFILE_H
 
@@ -14,7 +15,6 @@
 #define KVM_PROFILING	4
 
 struct proc_dir_entry;
-struct pt_regs;
 struct notifier_block;
 
 #if defined(CONFIG_PROFILING) && defined(CONFIG_PROC_FS)
@@ -44,6 +44,7 @@ extern int prof_on __read_mostly;
 int profile_init(void);
 int profile_setup(char *str);
 void profile_tick(int type);
+int setup_profiling_timer(unsigned int multiplier);
 
 /*
  * Add multiple profiler hits to a given address:
@@ -81,8 +82,6 @@ int task_handoff_unregister(struct notifier_block * n);
 
 int profile_event_register(enum profile_type, struct notifier_block * n);
 int profile_event_unregister(enum profile_type, struct notifier_block * n);
-
-struct pt_regs;
 
 #else
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -187,7 +188,7 @@ struct generic_type {
 	mode_t mode;
 };
 
-static struct generic_type generic_type_table[] = {
+static const struct generic_type generic_type_table[] = {
 	[GT_DIR] = {
 		.type = "dir",
 		.mode = S_IFDIR
@@ -319,6 +320,12 @@ static int cpio_mkfile(const char *name, const char *location,
 		goto error;
 	}
 
+	if (buf.st_mtime > 0xffffffff) {
+		fprintf(stderr, "%s: Timestamp exceeds maximum cpio timestamp, clipping.\n",
+			location);
+		buf.st_mtime = 0xffffffff;
+	}
+
 	filebuf = malloc(buf.st_size);
 	if (!filebuf) {
 		fprintf (stderr, "out of memory\n");
@@ -382,24 +389,15 @@ error:
 static char *cpio_replace_env(char *new_location)
 {
 	char expanded[PATH_MAX + 1];
-	char env_var[PATH_MAX + 1];
-	char *start;
-	char *end;
+	char *start, *end, *var;
 
-	for (start = NULL; (start = strstr(new_location, "${")); ) {
-		end = strchr(start, '}');
-		if (start < end) {
-			*env_var = *expanded = '\0';
-			strncat(env_var, start + 2, end - start - 2);
-			strncat(expanded, new_location, start - new_location);
-			strncat(expanded, getenv(env_var),
-				PATH_MAX - strlen(expanded));
-			strncat(expanded, end + 1,
-				PATH_MAX - strlen(expanded));
-			strncpy(new_location, expanded, PATH_MAX);
-			new_location[PATH_MAX] = 0;
-		} else
-			break;
+	while ((start = strstr(new_location, "${")) &&
+	       (end = strchr(start + 2, '}'))) {
+		*start = *end = 0;
+		var = getenv(start + 2);
+		snprintf(expanded, sizeof expanded, "%s%s%s",
+			 new_location, var ? var : "", end + 1);
+		strcpy(new_location, expanded);
 	}
 
 	return new_location;
@@ -499,7 +497,7 @@ static void usage(const char *prog)
 		prog);
 }
 
-struct file_handler file_handler_table[] = {
+static const struct file_handler file_handler_table[] = {
 	{
 		.type    = "file",
 		.handler = cpio_mkfile_line,
@@ -557,6 +555,16 @@ int main (int argc, char *argv[])
 			usage(argv[0]);
 			exit(opt == 'h' ? 0 : 1);
 		}
+	}
+
+	/*
+	 * Timestamps after 2106-02-07 06:28:15 UTC have an ascii hex time_t
+	 * representation that exceeds 8 chars and breaks the cpio header
+	 * specification.
+	 */
+	if (default_mtime > 0xffffffff) {
+		fprintf(stderr, "ERROR: Timestamp too large for cpio format\n");
+		exit(1);
 	}
 
 	if (argc - optind != 1) {

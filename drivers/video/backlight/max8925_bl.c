@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backlight driver for Maxim MAX8925
  *
  * Copyright (C) 2009 Marvell International Ltd.
  *      Haojian Zhuang <haojian.zhuang@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/init.h>
@@ -67,18 +64,7 @@ out:
 
 static int max8925_backlight_update_status(struct backlight_device *bl)
 {
-	int brightness = bl->props.brightness;
-
-	if (bl->props.power != FB_BLANK_UNBLANK)
-		brightness = 0;
-
-	if (bl->props.fb_blank != FB_BLANK_UNBLANK)
-		brightness = 0;
-
-	if (bl->props.state & BL_CORE_SUSPENDED)
-		brightness = 0;
-
-	return max8925_backlight_set(bl, brightness);
+	return max8925_backlight_set(bl, backlight_get_brightness(bl));
 }
 
 static int max8925_backlight_get_brightness(struct backlight_device *bl)
@@ -116,7 +102,7 @@ static void max8925_backlight_dt_init(struct platform_device *pdev)
 	if (!pdata)
 		return;
 
-	np = of_find_node_by_name(nproot, "backlight");
+	np = of_get_child_by_name(nproot, "backlight");
 	if (!np) {
 		dev_err(&pdev->dev, "failed to find backlight node\n");
 		return;
@@ -124,6 +110,8 @@ static void max8925_backlight_dt_init(struct platform_device *pdev)
 
 	if (!of_property_read_u32(np, "maxim,max8925-dual-string", &val))
 		pdata->dual_string = val;
+
+	of_node_put(np);
 
 	pdev->dev.platform_data = pdata;
 }
@@ -163,7 +151,8 @@ static int max8925_backlight_probe(struct platform_device *pdev)
 	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = MAX_BRIGHTNESS;
-	bl = backlight_device_register("max8925-backlight", &pdev->dev, data,
+	bl = devm_backlight_device_register(&pdev->dev, "max8925-backlight",
+					&pdev->dev, data,
 					&max8925_backlight_ops, &props);
 	if (IS_ERR(bl)) {
 		dev_err(&pdev->dev, "failed to register backlight\n");
@@ -188,29 +177,16 @@ static int max8925_backlight_probe(struct platform_device *pdev)
 	}
 	ret = max8925_set_bits(chip->i2c, data->reg_mode_cntl, 0xfe, value);
 	if (ret < 0)
-		goto out_brt;
+		return ret;
 	backlight_update_status(bl);
-	return 0;
-out_brt:
-	backlight_device_unregister(bl);
-	return ret;
-}
-
-static int max8925_backlight_remove(struct platform_device *pdev)
-{
-	struct backlight_device *bl = platform_get_drvdata(pdev);
-
-	backlight_device_unregister(bl);
 	return 0;
 }
 
 static struct platform_driver max8925_backlight_driver = {
 	.driver		= {
 		.name	= "max8925-backlight",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= max8925_backlight_probe,
-	.remove		= max8925_backlight_remove,
 };
 
 module_platform_driver(max8925_backlight_driver);

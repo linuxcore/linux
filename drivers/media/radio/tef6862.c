@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * tef6862.c Philips TEF6862 Car Radio Enhanced Selectivity Tuner
  * Copyright (c) 2009 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -48,15 +36,15 @@
 #define WM_SUB_TEST		0xF
 
 /* Different modes of the MSA register */
-#define MODE_BUFFER		0x0
-#define MODE_PRESET		0x1
-#define MODE_SEARCH		0x2
-#define MODE_AF_UPDATE		0x3
-#define MODE_JUMP		0x4
-#define MODE_CHECK		0x5
-#define MODE_LOAD		0x6
-#define MODE_END		0x7
-#define MODE_SHIFT		5
+#define MSA_MODE_BUFFER		0x0
+#define MSA_MODE_PRESET		0x1
+#define MSA_MODE_SEARCH		0x2
+#define MSA_MODE_AF_UPDATE	0x3
+#define MSA_MODE_JUMP		0x4
+#define MSA_MODE_CHECK		0x5
+#define MSA_MODE_LOAD		0x6
+#define MSA_MODE_END		0x7
+#define MSA_MODE_SHIFT		5
 
 struct tef6862_state {
 	struct v4l2_subdev sd;
@@ -83,7 +71,7 @@ static int tef6862_g_tuner(struct v4l2_subdev *sd, struct v4l2_tuner *v)
 		return -EINVAL;
 
 	/* only support FM for now */
-	strlcpy(v->name, "FM", sizeof(v->name));
+	strscpy(v->name, "FM", sizeof(v->name));
 	v->type = V4L2_TUNER_RADIO;
 	v->rangelow = TEF6862_LO_FREQ;
 	v->rangehigh = TEF6862_HI_FREQ;
@@ -112,9 +100,9 @@ static int tef6862_s_frequency(struct v4l2_subdev *sd, const struct v4l2_frequen
 	if (f->tuner != 0)
 		return -EINVAL;
 
-	clamp(freq, TEF6862_LO_FREQ, TEF6862_HI_FREQ);
+	freq = clamp(freq, TEF6862_LO_FREQ, TEF6862_HI_FREQ);
 	pll = 1964 + ((freq - TEF6862_LO_FREQ) * 20) / FREQ_MUL;
-	i2cmsg[0] = (MODE_PRESET << MODE_SHIFT) | WM_SUB_PLLM;
+	i2cmsg[0] = (MSA_MODE_PRESET << MSA_MODE_SHIFT) | WM_SUB_PLLM;
 	i2cmsg[1] = (pll >> 8) & 0xff;
 	i2cmsg[2] = pll & 0xff;
 
@@ -195,7 +183,6 @@ MODULE_DEVICE_TABLE(i2c, tef6862_id);
 
 static struct i2c_driver tef6862_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= DRIVER_NAME,
 	},
 	.probe		= tef6862_probe,

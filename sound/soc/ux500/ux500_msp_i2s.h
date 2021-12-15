@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) ST-Ericsson SA 2012
  *
@@ -5,10 +6,6 @@
  *         for ST-Ericsson.
  *
  * License terms:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 
@@ -475,7 +472,7 @@ struct ux500_msp_dma_params {
 };
 
 struct ux500_msp {
-	enum msp_i2s_id id;
+	int id;
 	void __iomem *registers;
 	struct device *dev;
 	struct ux500_msp_dma_params playback_dma_data;

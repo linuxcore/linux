@@ -1,41 +1,27 @@
-/* saa711x - Philips SAA711x video decoder driver
- * This driver can work with saa7111, saa7111a, saa7113, saa7114,
- *			     saa7115 and saa7118.
- *
- * Based on saa7114 driver by Maxim Yevtyushkin, which is based on
- * the saa7111 driver by Dave Perks.
- *
- * Copyright (C) 1998 Dave Perks <dperks@ibm.net>
- * Copyright (C) 2002 Maxim Yevtyushkin <max@linuxmedialabs.com>
- *
- * Slight changes for video timing and attachment output by
- * Wolfgang Scherr <scherr@net4you.net>
- *
- * Moved over to the linux >= 2.4.x i2c protocol (1/1/2003)
- * by Ronald Bultje <rbultje@ronald.bitfreak.net>
- *
- * Added saa7115 support by Kevin Thayer <nufan_wfk at yahoo.com>
- * (2/17/2003)
- *
- * VBI support (2004) and cleanups (2005) by Hans Verkuil <hverkuil@xs4all.nl>
- *
- * Copyright (c) 2005-2006 Mauro Carvalho Chehab <mchehab@infradead.org>
- *	SAA7111, SAA7113 and SAA7118 support
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- */
+// SPDX-License-Identifier: GPL-2.0+
+// saa711x - Philips SAA711x video decoder driver
+// This driver can work with saa7111, saa7111a, saa7113, saa7114,
+//			     saa7115 and saa7118.
+//
+// Based on saa7114 driver by Maxim Yevtyushkin, which is based on
+// the saa7111 driver by Dave Perks.
+//
+// Copyright (C) 1998 Dave Perks <dperks@ibm.net>
+// Copyright (C) 2002 Maxim Yevtyushkin <max@linuxmedialabs.com>
+//
+// Slight changes for video timing and attachment output by
+// Wolfgang Scherr <scherr@net4you.net>
+//
+// Moved over to the linux >= 2.4.x i2c protocol (1/1/2003)
+// by Ronald Bultje <rbultje@ronald.bitfreak.net>
+//
+// Added saa7115 support by Kevin Thayer <nufan_wfk at yahoo.com>
+// (2/17/2003)
+//
+// VBI support (2004) and cleanups (2005) by Hans Verkuil <hverkuil@xs4all.nl>
+//
+// Copyright (c) 2005-2006 Mauro Carvalho Chehab <mchehab@kernel.org>
+//	SAA7111, SAA7113 and SAA7118 support
 
 #include "saa711x_regs.h"
 
@@ -46,7 +32,8 @@
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
-#include <media/saa7115.h>
+#include <media/v4l2-mc.h>
+#include <media/i2c/saa7115.h>
 #include <asm/div64.h>
 
 #define VRES_60HZ	(480+16)
@@ -72,8 +59,17 @@ enum saa711x_model {
 	SAA7118,
 };
 
+enum saa711x_pads {
+	SAA711X_PAD_IF_INPUT,
+	SAA711X_PAD_VID_OUT,
+	SAA711X_NUM_PADS
+};
+
 struct saa711x_state {
 	struct v4l2_subdev sd;
+#ifdef CONFIG_MEDIA_CONTROLLER
+	struct media_pad pads[SAA711X_NUM_PADS];
+#endif
 	struct v4l2_ctrl_handler hdl;
 
 	struct {
@@ -225,19 +221,27 @@ static const unsigned char saa7111_init[] = {
 	0x00, 0x00
 };
 
-/* SAA7113/GM7113C init codes
- * It's important that R_14... R_17 == 0x00
- * for the gm7113c chip to deliver stable video
+/*
+ * This table has one illegal value, and some values that are not
+ * correct according to the datasheet initialization table.
+ *
+ *  If you need a table with legal/default values tell the driver in
+ *  i2c_board_info.platform_data, and you will get the gm7113c_init
+ *  table instead.
  */
+
+/* SAA7113 Init codes */
 static const unsigned char saa7113_init[] = {
 	R_01_INC_DELAY, 0x08,
 	R_02_INPUT_CNTL_1, 0xc2,
 	R_03_INPUT_CNTL_2, 0x30,
 	R_04_INPUT_CNTL_3, 0x00,
 	R_05_INPUT_CNTL_4, 0x00,
-	R_06_H_SYNC_START, 0x89,
+	R_06_H_SYNC_START, 0x89,	/* Illegal value -119,
+					 * min. value = -108 (0x94) */
 	R_07_H_SYNC_STOP, 0x0d,
-	R_08_SYNC_CNTL, 0x88,
+	R_08_SYNC_CNTL, 0x88,		/* Not datasheet default.
+					 * HTC = VTR mode, should be 0x98 */
 	R_09_LUMA_CNTL, 0x01,
 	R_0A_LUMA_BRIGHT_CNTL, 0x80,
 	R_0B_LUMA_CONTRAST_CNTL, 0x47,
@@ -245,9 +249,45 @@ static const unsigned char saa7113_init[] = {
 	R_0D_CHROMA_HUE_CNTL, 0x00,
 	R_0E_CHROMA_CNTL_1, 0x01,
 	R_0F_CHROMA_GAIN_CNTL, 0x2a,
-	R_10_CHROMA_CNTL_2, 0x08,
+	R_10_CHROMA_CNTL_2, 0x08,	/* Not datsheet default.
+					 * VRLN enabled, should be 0x00 */
 	R_11_MODE_DELAY_CNTL, 0x0c,
-	R_12_RT_SIGNAL_CNTL, 0x07,
+	R_12_RT_SIGNAL_CNTL, 0x07,	/* Not datasheet default,
+					 * should be 0x01 */
+	R_13_RT_X_PORT_OUT_CNTL, 0x00,
+	R_14_ANAL_ADC_COMPAT_CNTL, 0x00,
+	R_15_VGATE_START_FID_CHG, 0x00,
+	R_16_VGATE_STOP, 0x00,
+	R_17_MISC_VGATE_CONF_AND_MSB, 0x00,
+
+	0x00, 0x00
+};
+
+/*
+ * GM7113C is a clone of the SAA7113 chip
+ *  This init table is copied out of the saa7113 datasheet.
+ *  In R_08 we enable "Automatic Field Detection" [AUFD],
+ *  this is disabled when saa711x_set_v4lstd is called.
+ */
+static const unsigned char gm7113c_init[] = {
+	R_01_INC_DELAY, 0x08,
+	R_02_INPUT_CNTL_1, 0xc0,
+	R_03_INPUT_CNTL_2, 0x33,
+	R_04_INPUT_CNTL_3, 0x00,
+	R_05_INPUT_CNTL_4, 0x00,
+	R_06_H_SYNC_START, 0xe9,
+	R_07_H_SYNC_STOP, 0x0d,
+	R_08_SYNC_CNTL, 0x98,
+	R_09_LUMA_CNTL, 0x01,
+	R_0A_LUMA_BRIGHT_CNTL, 0x80,
+	R_0B_LUMA_CONTRAST_CNTL, 0x47,
+	R_0C_CHROMA_SAT_CNTL, 0x40,
+	R_0D_CHROMA_HUE_CNTL, 0x00,
+	R_0E_CHROMA_CNTL_1, 0x01,
+	R_0F_CHROMA_GAIN_CNTL, 0x2a,
+	R_10_CHROMA_CNTL_2, 0x00,
+	R_11_MODE_DELAY_CNTL, 0x0c,
+	R_12_RT_SIGNAL_CNTL, 0x01,
 	R_13_RT_X_PORT_OUT_CNTL, 0x00,
 	R_14_ANAL_ADC_COMPAT_CNTL, 0x00,
 	R_15_VGATE_START_FID_CHG, 0x00,
@@ -461,24 +501,6 @@ static const unsigned char saa7115_cfg_50hz_video[] = {
 };
 
 /* ============== SAA7715 VIDEO templates (end) =======  */
-
-/* ============== GM7113C VIDEO templates =============  */
-static const unsigned char gm7113c_cfg_60hz_video[] = {
-	R_08_SYNC_CNTL, 0x68,			/* 0xBO: auto detection, 0x68 = NTSC */
-	R_0E_CHROMA_CNTL_1, 0x07,		/* video autodetection is on */
-
-	0x00, 0x00
-};
-
-static const unsigned char gm7113c_cfg_50hz_video[] = {
-	R_08_SYNC_CNTL, 0x28,			/* 0x28 = PAL */
-	R_0E_CHROMA_CNTL_1, 0x07,
-
-	0x00, 0x00
-};
-
-/* ============== GM7113C VIDEO templates (end) =======  */
-
 
 static const unsigned char saa7115_cfg_vbi_on[] = {
 	R_80_GLOBAL_CNTL_1, 0x00,			/* reset tasks */
@@ -732,7 +754,7 @@ static int saa711x_s_clock_freq(struct v4l2_subdev *sd, u32 freq)
 	u32 acni;
 	u32 hz;
 	u64 f;
-	u8 acc = 0; 	/* reg 0x3a, audio clock control */
+	u8 acc = 0;	/* reg 0x3a, audio clock control */
 
 	/* Checks for chips that don't have audio clock (saa7111, saa7113) */
 	if (!saa711x_has_reg(state->ident, R_30_AUD_MAST_CLK_CYCLES_PER_FIELD))
@@ -964,17 +986,24 @@ static void saa711x_set_v4lstd(struct v4l2_subdev *sd, v4l2_std_id std)
 	// This works for NTSC-M, SECAM-L and the 50Hz PAL variants.
 	if (std & V4L2_STD_525_60) {
 		v4l2_dbg(1, debug, sd, "decoder set standard 60 Hz\n");
-		if (state->ident == GM7113C)
-			saa711x_writeregs(sd, gm7113c_cfg_60hz_video);
-		else
+		if (state->ident == GM7113C) {
+			u8 reg = saa711x_read(sd, R_08_SYNC_CNTL);
+			reg &= ~(SAA7113_R_08_FSEL | SAA7113_R_08_AUFD);
+			reg |= SAA7113_R_08_FSEL;
+			saa711x_write(sd, R_08_SYNC_CNTL, reg);
+		} else {
 			saa711x_writeregs(sd, saa7115_cfg_60hz_video);
+		}
 		saa711x_set_size(sd, 720, 480);
 	} else {
 		v4l2_dbg(1, debug, sd, "decoder set standard 50 Hz\n");
-		if (state->ident == GM7113C)
-			saa711x_writeregs(sd, gm7113c_cfg_50hz_video);
-		else
+		if (state->ident == GM7113C) {
+			u8 reg = saa711x_read(sd, R_08_SYNC_CNTL);
+			reg &= ~(SAA7113_R_08_FSEL | SAA7113_R_08_AUFD);
+			saa711x_write(sd, R_08_SYNC_CNTL, reg);
+		} else {
 			saa711x_writeregs(sd, saa7115_cfg_50hz_video);
+		}
 		saa711x_set_size(sd, 720, 576);
 	}
 
@@ -1137,12 +1166,18 @@ static int saa711x_s_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_f
 	return 0;
 }
 
-static int saa711x_s_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
+static int saa711x_set_fmt(struct v4l2_subdev *sd,
+		struct v4l2_subdev_state *sd_state,
+		struct v4l2_subdev_format *format)
 {
-	if (fmt->code != V4L2_MBUS_FMT_FIXED)
+	struct v4l2_mbus_framefmt *fmt = &format->format;
+
+	if (format->pad || fmt->code != MEDIA_BUS_FMT_FIXED)
 		return -EINVAL;
 	fmt->field = V4L2_FIELD_INTERLACED;
 	fmt->colorspace = V4L2_COLORSPACE_SMPTE170M;
+	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
+		return 0;
 	return saa711x_set_size(sd, fmt->width, fmt->height);
 }
 
@@ -1542,14 +1577,6 @@ static const struct v4l2_ctrl_ops saa711x_ctrl_ops = {
 
 static const struct v4l2_subdev_core_ops saa711x_core_ops = {
 	.log_status = saa711x_log_status,
-	.g_ext_ctrls = v4l2_subdev_g_ext_ctrls,
-	.try_ext_ctrls = v4l2_subdev_try_ext_ctrls,
-	.s_ext_ctrls = v4l2_subdev_s_ext_ctrls,
-	.g_ctrl = v4l2_subdev_g_ctrl,
-	.s_ctrl = v4l2_subdev_s_ctrl,
-	.queryctrl = v4l2_subdev_queryctrl,
-	.querymenu = v4l2_subdev_querymenu,
-	.s_std = saa711x_s_std,
 	.reset = saa711x_reset,
 	.s_gpio = saa711x_s_gpio,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
@@ -1568,9 +1595,9 @@ static const struct v4l2_subdev_audio_ops saa711x_audio_ops = {
 };
 
 static const struct v4l2_subdev_video_ops saa711x_video_ops = {
+	.s_std = saa711x_s_std,
 	.s_routing = saa711x_s_routing,
 	.s_crystal_freq = saa711x_s_crystal_freq,
-	.s_mbus_fmt = saa711x_s_mbus_fmt,
 	.s_stream = saa711x_s_stream,
 	.querystd = saa711x_querystd,
 	.g_input_status = saa711x_g_input_status,
@@ -1584,17 +1611,81 @@ static const struct v4l2_subdev_vbi_ops saa711x_vbi_ops = {
 	.s_raw_fmt = saa711x_s_raw_fmt,
 };
 
+static const struct v4l2_subdev_pad_ops saa711x_pad_ops = {
+	.set_fmt = saa711x_set_fmt,
+};
+
 static const struct v4l2_subdev_ops saa711x_ops = {
 	.core = &saa711x_core_ops,
 	.tuner = &saa711x_tuner_ops,
 	.audio = &saa711x_audio_ops,
 	.video = &saa711x_video_ops,
 	.vbi = &saa711x_vbi_ops,
+	.pad = &saa711x_pad_ops,
 };
 
 #define CHIP_VER_SIZE	16
 
 /* ----------------------------------------------------------------------- */
+
+static void saa711x_write_platform_data(struct saa711x_state *state,
+					struct saa7115_platform_data *data)
+{
+	struct v4l2_subdev *sd = &state->sd;
+	u8 work;
+
+	if (state->ident != GM7113C &&
+	    state->ident != SAA7113)
+		return;
+
+	if (data->saa7113_r08_htc) {
+		work = saa711x_read(sd, R_08_SYNC_CNTL);
+		work &= ~SAA7113_R_08_HTC_MASK;
+		work |= ((*data->saa7113_r08_htc) << SAA7113_R_08_HTC_OFFSET);
+		saa711x_write(sd, R_08_SYNC_CNTL, work);
+	}
+
+	if (data->saa7113_r10_vrln) {
+		work = saa711x_read(sd, R_10_CHROMA_CNTL_2);
+		work &= ~SAA7113_R_10_VRLN_MASK;
+		if (*data->saa7113_r10_vrln)
+			work |= (1 << SAA7113_R_10_VRLN_OFFSET);
+		saa711x_write(sd, R_10_CHROMA_CNTL_2, work);
+	}
+
+	if (data->saa7113_r10_ofts) {
+		work = saa711x_read(sd, R_10_CHROMA_CNTL_2);
+		work &= ~SAA7113_R_10_OFTS_MASK;
+		work |= (*data->saa7113_r10_ofts << SAA7113_R_10_OFTS_OFFSET);
+		saa711x_write(sd, R_10_CHROMA_CNTL_2, work);
+	}
+
+	if (data->saa7113_r12_rts0) {
+		work = saa711x_read(sd, R_12_RT_SIGNAL_CNTL);
+		work &= ~SAA7113_R_12_RTS0_MASK;
+		work |= (*data->saa7113_r12_rts0 << SAA7113_R_12_RTS0_OFFSET);
+
+		/* According to the datasheet,
+		 * SAA7113_RTS_DOT_IN should only be used on RTS1 */
+		WARN_ON(*data->saa7113_r12_rts0 == SAA7113_RTS_DOT_IN);
+		saa711x_write(sd, R_12_RT_SIGNAL_CNTL, work);
+	}
+
+	if (data->saa7113_r12_rts1) {
+		work = saa711x_read(sd, R_12_RT_SIGNAL_CNTL);
+		work &= ~SAA7113_R_12_RTS1_MASK;
+		work |= (*data->saa7113_r12_rts1 << SAA7113_R_12_RTS1_OFFSET);
+		saa711x_write(sd, R_12_RT_SIGNAL_CNTL, work);
+	}
+
+	if (data->saa7113_r13_adlsb) {
+		work = saa711x_read(sd, R_13_RT_X_PORT_OUT_CNTL);
+		work &= ~SAA7113_R_13_ADLSB_MASK;
+		if (*data->saa7113_r13_adlsb)
+			work |= (1 << SAA7113_R_13_ADLSB_OFFSET);
+		saa711x_write(sd, R_13_RT_X_PORT_OUT_CNTL, work);
+	}
+}
 
 /**
  * saa711x_detect_chip - Detects the saa711x (or clone) variant
@@ -1607,7 +1698,7 @@ static const struct v4l2_subdev_ops saa711x_ops = {
  * the analog demod.
  * If the tuner is not found, it returns -ENODEV.
  * If auto-detection is disabled and the tuner doesn't match what it was
- *	requred, it returns -EINVAL and fills 'name'.
+ *	required, it returns -EINVAL and fills 'name'.
  * If the chip is found, it returns the chip ID and fills 'name'.
  */
 static int saa711x_detect_chip(struct i2c_client *client,
@@ -1675,12 +1766,12 @@ static int saa711x_detect_chip(struct i2c_client *client,
 		 * exists. However, tests on a device labeled as:
 		 * "GM7113C 1145" returned "10" on all 16 chip
 		 * version (reg 0x00) reads. So, we need to also
-		 * accept at least verion 0. For now, let's just
+		 * accept at least version 0. For now, let's just
 		 * assume that a device that returns "0000" for
 		 * the lower nibble is a gm7113c.
 		 */
 
-		strlcpy(name, "gm7113c", CHIP_VER_SIZE);
+		strscpy(name, "gm7113c", CHIP_VER_SIZE);
 
 		if (!autodetect && strcmp(name, id->name))
 			return -EINVAL;
@@ -1690,6 +1781,21 @@ static int saa711x_detect_chip(struct i2c_client *client,
 			name, 16, chip_ver, client->addr << 1);
 
 		return GM7113C;
+	}
+
+	/* Check if it is a CJC7113 */
+	if (!memcmp(name, "1111111111111111", CHIP_VER_SIZE)) {
+		strscpy(name, "cjc7113", CHIP_VER_SIZE);
+
+		if (!autodetect && strcmp(name, id->name))
+			return -EINVAL;
+
+		v4l_dbg(1, debug, client,
+			"It seems to be a %s chip (%*ph) @ 0x%x.\n",
+			name, 16, chip_ver, client->addr << 1);
+
+		/* CJC7113 seems to be SAA7113-compatible */
+		return SAA7113;
 	}
 
 	/* Chip was not discovered. Return its ID and don't bind */
@@ -1704,8 +1810,12 @@ static int saa711x_probe(struct i2c_client *client,
 	struct saa711x_state *state;
 	struct v4l2_subdev *sd;
 	struct v4l2_ctrl_handler *hdl;
+	struct saa7115_platform_data *pdata;
 	int ident;
 	char name[CHIP_VER_SIZE + 1];
+#if defined(CONFIG_MEDIA_CONTROLLER)
+	int ret;
+#endif
 
 	/* Check if the adapter supports the needed features */
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
@@ -1721,13 +1831,27 @@ static int saa711x_probe(struct i2c_client *client,
 	if (ident < 0)
 		return ident;
 
-	strlcpy(client->name, name, sizeof(client->name));
+	strscpy(client->name, name, sizeof(client->name));
 
 	state = devm_kzalloc(&client->dev, sizeof(*state), GFP_KERNEL);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
 	v4l2_i2c_subdev_init(sd, client, &saa711x_ops);
+
+#if defined(CONFIG_MEDIA_CONTROLLER)
+	state->pads[SAA711X_PAD_IF_INPUT].flags = MEDIA_PAD_FL_SINK;
+	state->pads[SAA711X_PAD_IF_INPUT].sig_type = PAD_SIGNAL_ANALOG;
+	state->pads[SAA711X_PAD_VID_OUT].flags = MEDIA_PAD_FL_SOURCE;
+	state->pads[SAA711X_PAD_VID_OUT].sig_type = PAD_SIGNAL_DV;
+
+	sd->entity.function = MEDIA_ENT_F_ATV_DECODER;
+
+	ret = media_entity_pads_init(&sd->entity, SAA711X_NUM_PADS,
+				     state->pads);
+	if (ret < 0)
+		return ret;
+#endif
 
 	v4l_info(client, "%s found @ 0x%x (%s)\n", name,
 		 client->addr << 1, client->adapter->name);
@@ -1767,21 +1891,31 @@ static int saa711x_probe(struct i2c_client *client,
 
 	/* init to 60hz/48khz */
 	state->crystal_freq = SAA7115_FREQ_24_576_MHZ;
+	pdata = client->dev.platform_data;
 	switch (state->ident) {
 	case SAA7111:
 	case SAA7111A:
 		saa711x_writeregs(sd, saa7111_init);
 		break;
 	case GM7113C:
+		saa711x_writeregs(sd, gm7113c_init);
+		break;
 	case SAA7113:
-		saa711x_writeregs(sd, saa7113_init);
+		if (pdata && pdata->saa7113_force_gm7113c_init)
+			saa711x_writeregs(sd, gm7113c_init);
+		else
+			saa711x_writeregs(sd, saa7113_init);
 		break;
 	default:
 		state->crystal_freq = SAA7115_FREQ_32_11_MHZ;
 		saa711x_writeregs(sd, saa7115_init_auto_input);
 	}
-	if (state->ident > SAA7111A)
+	if (state->ident > SAA7111A && state->ident != GM7113C)
 		saa711x_writeregs(sd, saa7115_init_misc);
+
+	if (pdata)
+		saa711x_write_platform_data(state, pdata);
+
 	saa711x_set_v4lstd(sd, V4L2_STD_NTSC);
 	v4l2_ctrl_handler_setup(hdl);
 
@@ -1816,7 +1950,6 @@ MODULE_DEVICE_TABLE(i2c, saa711x_id);
 
 static struct i2c_driver saa711x_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "saa7115",
 	},
 	.probe		= saa711x_probe,

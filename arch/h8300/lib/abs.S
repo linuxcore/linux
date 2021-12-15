@@ -1,11 +1,12 @@
+;;; SPDX-License-Identifier: GPL-2.0
 ;;; abs.S
 
 #include <asm/linkage.h>
 
-#if defined(__H8300H__) 
+#if defined(CONFIG_CPU_H8300H)
 	.h8300h
 #endif
-#if defined(__H8300S__) 
+#if defined(CONFIG_CPU_H8S)
 	.h8300s
 #endif
 	.text
@@ -18,4 +19,3 @@ _abs:
 	neg.l	er0
 1:
 	rts
-	

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-1.0+
 /*
  * OHCI HCD (Host Controller Driver) for USB.
  *
@@ -150,28 +151,26 @@ static int ohci_quirk_nec(struct usb_hcd *hcd)
 static int ohci_quirk_amd700(struct usb_hcd *hcd)
 {
 	struct ohci_hcd *ohci = hcd_to_ohci(hcd);
-	struct pci_dev *amd_smbus_dev;
-	u8 rev;
 
-	if (usb_amd_find_chipset_info())
+	if (usb_amd_quirk_pll_check())
 		ohci->flags |= OHCI_QUIRK_AMD_PLL;
 
-	amd_smbus_dev = pci_get_device(PCI_VENDOR_ID_ATI,
-			PCI_DEVICE_ID_ATI_SBX00_SMBUS, NULL);
-	if (!amd_smbus_dev)
-		return 0;
-
-	rev = amd_smbus_dev->revision;
-
 	/* SB800 needs pre-fetch fix */
-	if ((rev >= 0x40) && (rev <= 0x4f)) {
+	if (usb_amd_prefetch_quirk()) {
 		ohci->flags |= OHCI_QUIRK_AMD_PREFETCH;
 		ohci_dbg(ohci, "enabled AMD prefetch quirk\n");
 	}
 
-	pci_dev_put(amd_smbus_dev);
-	amd_smbus_dev = NULL;
+	ohci->flags |= OHCI_QUIRK_GLOBAL_SUSPEND;
+	return 0;
+}
 
+static int ohci_quirk_qemu(struct usb_hcd *hcd)
+{
+	struct ohci_hcd *ohci = hcd_to_ohci(hcd);
+
+	ohci->flags |= OHCI_QUIRK_QEMU;
+	ohci_dbg(ohci, "enabled qemu quirk\n");
 	return 0;
 }
 
@@ -225,10 +224,13 @@ static const struct pci_device_id ohci_pci_quirks[] = {
 		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4399),
 		.driver_data = (unsigned long)ohci_quirk_amd700,
 	},
-
-	/* FIXME for some of the early AMD 760 southbridges, OHCI
-	 * won't work at all.  blacklist them.
-	 */
+	{
+		.vendor		= PCI_VENDOR_ID_APPLE,
+		.device		= 0x003f,
+		.subvendor	= PCI_SUBVENDOR_ID_REDHAT_QUMRANET,
+		.subdevice	= PCI_SUBDEVICE_ID_QEMU,
+		.driver_data	= (unsigned long)ohci_quirk_qemu,
+	},
 
 	{},
 };
@@ -268,28 +270,31 @@ static const struct ohci_driver_overrides pci_overrides __initconst = {
 	.reset =		ohci_pci_reset,
 };
 
-static const struct pci_device_id pci_ids [] = { {
+static const struct pci_device_id pci_ids[] = { {
 	/* handle any USB OHCI controller */
 	PCI_DEVICE_CLASS(PCI_CLASS_SERIAL_USB_OHCI, ~0),
-	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
 	}, {
 	/* The device in the ConneXT I/O hub has no class reg */
 	PCI_VDEVICE(STMICRO, PCI_DEVICE_ID_STMICRO_USB_OHCI),
-	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
 	}, { /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE (pci, pci_ids);
 
+static int ohci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+{
+	return usb_hcd_pci_probe(dev, id, &ohci_pci_hc_driver);
+}
+
 /* pci driver glue; this is a "new style" PCI driver module */
 static struct pci_driver ohci_pci_driver = {
-	.name =		(char *) hcd_name,
+	.name =		hcd_name,
 	.id_table =	pci_ids,
 
-	.probe =	usb_hcd_pci_probe,
+	.probe =	ohci_pci_probe,
 	.remove =	usb_hcd_pci_remove,
 	.shutdown =	usb_hcd_pci_shutdown,
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.driver =	{
 		.pm =	&usb_hcd_pci_pm_ops
 	},
@@ -304,6 +309,13 @@ static int __init ohci_pci_init(void)
 	pr_info("%s: " DRIVER_DESC "\n", hcd_name);
 
 	ohci_init_driver(&ohci_pci_hc_driver, &pci_overrides);
+
+#ifdef	CONFIG_PM
+	/* Entries for the PCI suspend/resume callbacks are special */
+	ohci_pci_hc_driver.pci_suspend = ohci_suspend;
+	ohci_pci_hc_driver.pci_resume = ohci_resume;
+#endif
+
 	return pci_register_driver(&ohci_pci_driver);
 }
 module_init(ohci_pci_init);
@@ -316,3 +328,4 @@ module_exit(ohci_pci_cleanup);
 
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
+MODULE_SOFTDEP("pre: ehci_pci");

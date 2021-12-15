@@ -1,25 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 * Filename: dma.c
-*
 *
 * Authors: Joshua Morris <josh.h.morris@us.ibm.com>
 *	Philip Kelleher <pjk1939@linux.vnet.ibm.com>
 *
 * (C) Copyright 2013 IBM Corporation
-*
-* This program is free software; you can redistribute it and/or
-* modify it under the terms of the GNU General Public License as
-* published by the Free Software Foundation; either version 2 of the
-* License, or (at your option) any later version.
-*
-* This program is distributed in the hope that it will be useful, but
-* WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-* General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with this program; if not, write to the Free Software Foundation,
-* Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 */
 
 #include <linux/slab.h>
@@ -88,13 +74,10 @@ struct dma_tracker {
 	struct rsxx_dma	*dma;
 };
 
-#define DMA_TRACKER_LIST_SIZE8 (sizeof(struct dma_tracker_list) + \
-		(sizeof(struct dma_tracker) * RSXX_MAX_OUTSTANDING_CMDS))
-
 struct dma_tracker_list {
 	spinlock_t		lock;
 	int			head;
-	struct dma_tracker	list[0];
+	struct dma_tracker	list[];
 };
 
 
@@ -221,6 +204,21 @@ static void dma_intr_coal_auto_tune(struct rsxx_cardinfo *card)
 }
 
 /*----------------- RSXX DMA Handling -------------------*/
+static void rsxx_free_dma(struct rsxx_dma_ctrl *ctrl, struct rsxx_dma *dma)
+{
+	if (dma->cmd != HW_CMD_BLK_DISCARD) {
+		if (!dma_mapping_error(&ctrl->card->dev->dev, dma->dma_addr)) {
+			dma_unmap_page(&ctrl->card->dev->dev, dma->dma_addr,
+				       get_dma_size(dma),
+				       dma->cmd == HW_CMD_BLK_WRITE ?
+						   DMA_TO_DEVICE :
+						   DMA_FROM_DEVICE);
+		}
+	}
+
+	kmem_cache_free(rsxx_dma_pool, dma);
+}
+
 static void rsxx_complete_dma(struct rsxx_dma_ctrl *ctrl,
 				  struct rsxx_dma *dma,
 				  unsigned int status)
@@ -232,21 +230,14 @@ static void rsxx_complete_dma(struct rsxx_dma_ctrl *ctrl,
 	if (status & DMA_CANCELLED)
 		ctrl->stats.dma_cancelled++;
 
-	if (dma->dma_addr)
-		pci_unmap_page(ctrl->card->dev, dma->dma_addr,
-			       get_dma_size(dma),
-			       dma->cmd == HW_CMD_BLK_WRITE ?
-					   PCI_DMA_TODEVICE :
-					   PCI_DMA_FROMDEVICE);
-
 	if (dma->cb)
 		dma->cb(ctrl->card, dma->cb_data, status ? 1 : 0);
 
-	kmem_cache_free(rsxx_dma_pool, dma);
+	rsxx_free_dma(ctrl, dma);
 }
 
 int rsxx_cleanup_dma_queue(struct rsxx_dma_ctrl *ctrl,
-			   struct list_head *q)
+			   struct list_head *q, unsigned int done)
 {
 	struct rsxx_dma *dma;
 	struct rsxx_dma *tmp;
@@ -254,7 +245,10 @@ int rsxx_cleanup_dma_queue(struct rsxx_dma_ctrl *ctrl,
 
 	list_for_each_entry_safe(dma, tmp, q, list) {
 		list_del(&dma->list);
-		rsxx_complete_dma(ctrl, dma, DMA_CANCELLED);
+		if (done & COMPLETE_DMA)
+			rsxx_complete_dma(ctrl, dma, DMA_CANCELLED);
+		else
+			rsxx_free_dma(ctrl, dma);
 		cnt++;
 	}
 
@@ -343,9 +337,9 @@ static void rsxx_handle_dma_error(struct rsxx_dma_ctrl *ctrl,
 		rsxx_complete_dma(ctrl, dma, status);
 }
 
-static void dma_engine_stalled(unsigned long data)
+static void dma_engine_stalled(struct timer_list *t)
 {
-	struct rsxx_dma_ctrl *ctrl = (struct rsxx_dma_ctrl *)data;
+	struct rsxx_dma_ctrl *ctrl = from_timer(ctrl, t, activity_timer);
 	int cnt;
 
 	if (atomic_read(&ctrl->stats.hw_q_depth) == 0 ||
@@ -370,7 +364,7 @@ static void dma_engine_stalled(unsigned long data)
 
 		/* Clean up the DMA queue */
 		spin_lock(&ctrl->queue_lock);
-		cnt = rsxx_cleanup_dma_queue(ctrl, &ctrl->queue);
+		cnt = rsxx_cleanup_dma_queue(ctrl, &ctrl->queue, COMPLETE_DMA);
 		spin_unlock(&ctrl->queue_lock);
 
 		cnt += rsxx_dma_cancel(ctrl);
@@ -388,6 +382,7 @@ static void rsxx_issue_dmas(struct rsxx_dma_ctrl *ctrl)
 	int tag;
 	int cmds_pending = 0;
 	struct hw_cmd *hw_cmd_buf;
+	int dir;
 
 	hw_cmd_buf = ctrl->cmd.buf;
 
@@ -422,6 +417,31 @@ static void rsxx_issue_dmas(struct rsxx_dma_ctrl *ctrl)
 			push_tracker(ctrl->trackers, tag);
 			rsxx_complete_dma(ctrl, dma, DMA_CANCELLED);
 			continue;
+		}
+
+		if (dma->cmd != HW_CMD_BLK_DISCARD) {
+			if (dma->cmd == HW_CMD_BLK_WRITE)
+				dir = DMA_TO_DEVICE;
+			else
+				dir = DMA_FROM_DEVICE;
+
+			/*
+			 * The function dma_map_page is placed here because we
+			 * can only, by design, issue up to 255 commands to the
+			 * hardware at one time per DMA channel. So the maximum
+			 * amount of mapped memory would be 255 * 4 channels *
+			 * 4096 Bytes which is less than 2GB, the limit of a x8
+			 * Non-HWWD PCIe slot. This way the dma_map_page
+			 * function should never fail because of a lack of
+			 * mappable memory.
+			 */
+			dma->dma_addr = dma_map_page(&ctrl->card->dev->dev, dma->page,
+					dma->pg_off, dma->sub_page.cnt << 9, dir);
+			if (dma_mapping_error(&ctrl->card->dev->dev, dma->dma_addr)) {
+				push_tracker(ctrl->trackers, tag);
+				rsxx_complete_dma(ctrl, dma, DMA_CANCELLED);
+				continue;
+			}
 		}
 
 		set_tracker_dma(ctrl->trackers, tag, dma);
@@ -574,7 +594,7 @@ static void rsxx_schedule_done(struct work_struct *work)
 	mutex_unlock(&ctrl->work_lock);
 }
 
-static int rsxx_queue_discard(struct rsxx_cardinfo *card,
+static blk_status_t rsxx_queue_discard(struct rsxx_cardinfo *card,
 				  struct list_head *q,
 				  unsigned int laddr,
 				  rsxx_dma_cb cb,
@@ -584,7 +604,7 @@ static int rsxx_queue_discard(struct rsxx_cardinfo *card,
 
 	dma = kmem_cache_alloc(rsxx_dma_pool, GFP_KERNEL);
 	if (!dma)
-		return -ENOMEM;
+		return BLK_STS_RESOURCE;
 
 	dma->cmd          = HW_CMD_BLK_DISCARD;
 	dma->laddr        = laddr;
@@ -603,7 +623,7 @@ static int rsxx_queue_discard(struct rsxx_cardinfo *card,
 	return 0;
 }
 
-static int rsxx_queue_dma(struct rsxx_cardinfo *card,
+static blk_status_t rsxx_queue_dma(struct rsxx_cardinfo *card,
 			      struct list_head *q,
 			      int dir,
 			      unsigned int dma_off,
@@ -618,15 +638,7 @@ static int rsxx_queue_dma(struct rsxx_cardinfo *card,
 
 	dma = kmem_cache_alloc(rsxx_dma_pool, GFP_KERNEL);
 	if (!dma)
-		return -ENOMEM;
-
-	dma->dma_addr = pci_map_page(card->dev, page, pg_off, dma_len,
-				     dir ? PCI_DMA_TODEVICE :
-				     PCI_DMA_FROMDEVICE);
-	if (!dma->dma_addr) {
-		kmem_cache_free(rsxx_dma_pool, dma);
-		return -ENOMEM;
-	}
+		return BLK_STS_RESOURCE;
 
 	dma->cmd          = dir ? HW_CMD_BLK_WRITE : HW_CMD_BLK_READ;
 	dma->laddr        = laddr;
@@ -648,14 +660,15 @@ static int rsxx_queue_dma(struct rsxx_cardinfo *card,
 	return 0;
 }
 
-int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
+blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			   struct bio *bio,
 			   atomic_t *n_dmas,
 			   rsxx_dma_cb cb,
 			   void *cb_data)
 {
 	struct list_head dma_list[RSXX_MAX_TARGETS];
-	struct bio_vec *bvec;
+	struct bio_vec bvec;
+	struct bvec_iter iter;
 	unsigned long long addr8;
 	unsigned int laddr;
 	unsigned int bv_len;
@@ -664,10 +677,10 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 	unsigned int dma_len;
 	int dma_cnt[RSXX_MAX_TARGETS];
 	int tgt;
-	int st;
+	blk_status_t st;
 	int i;
 
-	addr8 = bio->bi_sector << 9; /* sectors are 512 bytes */
+	addr8 = bio->bi_iter.bi_sector << 9; /* sectors are 512 bytes */
 	atomic_set(n_dmas, 0);
 
 	for (i = 0; i < card->n_targets; i++) {
@@ -675,8 +688,8 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 		dma_cnt[i] = 0;
 	}
 
-	if (bio->bi_rw & REQ_DISCARD) {
-		bv_len = bio->bi_size;
+	if (bio_op(bio) == REQ_OP_DISCARD) {
+		bv_len = bio->bi_iter.bi_size;
 
 		while (bv_len > 0) {
 			tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -693,9 +706,9 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			bv_len -= RSXX_HW_BLK_SIZE;
 		}
 	} else {
-		bio_for_each_segment(bvec, bio, i) {
-			bv_len = bvec->bv_len;
-			bv_off = bvec->bv_offset;
+		bio_for_each_segment(bvec, bio, iter) {
+			bv_len = bvec.bv_len;
+			bv_off = bvec.bv_offset;
 
 			while (bv_len > 0) {
 				tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -707,7 +720,7 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 				st = rsxx_queue_dma(card, &dma_list[tgt],
 							bio_data_dir(bio),
 							dma_off, dma_len,
-							laddr, bvec->bv_page,
+							laddr, bvec.bv_page,
 							bv_off, cb, cb_data);
 				if (st)
 					goto bvec_err;
@@ -736,12 +749,9 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 	return 0;
 
 bvec_err:
-	for (i = 0; i < card->n_targets; i++) {
-		spin_lock_bh(&card->ctrl[i].queue_lock);
-		rsxx_cleanup_dma_queue(&card->ctrl[i], &dma_list[i]);
-		spin_unlock_bh(&card->ctrl[i].queue_lock);
-	}
-
+	for (i = 0; i < card->n_targets; i++)
+		rsxx_cleanup_dma_queue(&card->ctrl[i], &dma_list[i],
+					FREE_DMA);
 	return st;
 }
 
@@ -749,10 +759,10 @@ bvec_err:
 /*----------------- DMA Engine Initialization & Setup -------------------*/
 int rsxx_hw_buffers_init(struct pci_dev *dev, struct rsxx_dma_ctrl *ctrl)
 {
-	ctrl->status.buf = pci_alloc_consistent(dev, STATUS_BUFFER_SIZE8,
-				&ctrl->status.dma_addr);
-	ctrl->cmd.buf = pci_alloc_consistent(dev, COMMAND_BUFFER_SIZE8,
-				&ctrl->cmd.dma_addr);
+	ctrl->status.buf = dma_alloc_coherent(&dev->dev, STATUS_BUFFER_SIZE8,
+				&ctrl->status.dma_addr, GFP_KERNEL);
+	ctrl->cmd.buf = dma_alloc_coherent(&dev->dev, COMMAND_BUFFER_SIZE8,
+				&ctrl->cmd.dma_addr, GFP_KERNEL);
 	if (ctrl->status.buf == NULL || ctrl->cmd.buf == NULL)
 		return -ENOMEM;
 
@@ -795,7 +805,8 @@ static int rsxx_dma_ctrl_init(struct pci_dev *dev,
 
 	memset(&ctrl->stats, 0, sizeof(ctrl->stats));
 
-	ctrl->trackers = vmalloc(DMA_TRACKER_LIST_SIZE8);
+	ctrl->trackers = vmalloc(struct_size(ctrl->trackers, list,
+					     RSXX_MAX_OUTSTANDING_CMDS));
 	if (!ctrl->trackers)
 		return -ENOMEM;
 
@@ -811,8 +822,7 @@ static int rsxx_dma_ctrl_init(struct pci_dev *dev,
 	mutex_init(&ctrl->work_lock);
 	INIT_LIST_HEAD(&ctrl->queue);
 
-	setup_timer(&ctrl->activity_timer, dma_engine_stalled,
-					(unsigned long)ctrl);
+	timer_setup(&ctrl->activity_timer, dma_engine_stalled, 0);
 
 	ctrl->issue_wq = alloc_ordered_workqueue(DRIVER_NAME"_issue", 0);
 	if (!ctrl->issue_wq)
@@ -932,16 +942,15 @@ failed_dma_setup:
 			ctrl->done_wq = NULL;
 		}
 
-		if (ctrl->trackers)
-			vfree(ctrl->trackers);
+		vfree(ctrl->trackers);
 
 		if (ctrl->status.buf)
-			pci_free_consistent(card->dev, STATUS_BUFFER_SIZE8,
-					    ctrl->status.buf,
-					    ctrl->status.dma_addr);
+			dma_free_coherent(&card->dev->dev, STATUS_BUFFER_SIZE8,
+					  ctrl->status.buf,
+					  ctrl->status.dma_addr);
 		if (ctrl->cmd.buf)
-			pci_free_consistent(card->dev, COMMAND_BUFFER_SIZE8,
-					    ctrl->cmd.buf, ctrl->cmd.dma_addr);
+			dma_free_coherent(&card->dev->dev, COMMAND_BUFFER_SIZE8,
+					  ctrl->cmd.buf, ctrl->cmd.dma_addr);
 	}
 
 	return st;
@@ -990,17 +999,17 @@ void rsxx_dma_destroy(struct rsxx_cardinfo *card)
 
 		/* Clean up the DMA queue */
 		spin_lock_bh(&ctrl->queue_lock);
-		rsxx_cleanup_dma_queue(ctrl, &ctrl->queue);
+		rsxx_cleanup_dma_queue(ctrl, &ctrl->queue, COMPLETE_DMA);
 		spin_unlock_bh(&ctrl->queue_lock);
 
 		rsxx_dma_cancel(ctrl);
 
 		vfree(ctrl->trackers);
 
-		pci_free_consistent(card->dev, STATUS_BUFFER_SIZE8,
-				    ctrl->status.buf, ctrl->status.dma_addr);
-		pci_free_consistent(card->dev, COMMAND_BUFFER_SIZE8,
-				    ctrl->cmd.buf, ctrl->cmd.dma_addr);
+		dma_free_coherent(&card->dev->dev, STATUS_BUFFER_SIZE8,
+				  ctrl->status.buf, ctrl->status.dma_addr);
+		dma_free_coherent(&card->dev->dev, COMMAND_BUFFER_SIZE8,
+				  ctrl->cmd.buf, ctrl->cmd.dma_addr);
 	}
 }
 
@@ -1012,7 +1021,7 @@ int rsxx_eeh_save_issued_dmas(struct rsxx_cardinfo *card)
 	struct rsxx_dma *dma;
 	struct list_head *issued_dmas;
 
-	issued_dmas = kzalloc(sizeof(*issued_dmas) * card->n_targets,
+	issued_dmas = kcalloc(card->n_targets, sizeof(*issued_dmas),
 			      GFP_KERNEL);
 	if (!issued_dmas)
 		return -ENOMEM;
@@ -1032,6 +1041,14 @@ int rsxx_eeh_save_issued_dmas(struct rsxx_cardinfo *card)
 			else
 				card->ctrl[i].stats.reads_issued--;
 
+			if (dma->cmd != HW_CMD_BLK_DISCARD) {
+				dma_unmap_page(&card->dev->dev, dma->dma_addr,
+					       get_dma_size(dma),
+					       dma->cmd == HW_CMD_BLK_WRITE ?
+					       DMA_TO_DEVICE :
+					       DMA_FROM_DEVICE);
+			}
+
 			list_add_tail(&dma->list, &issued_dmas[i]);
 			push_tracker(card->ctrl[i].trackers, j);
 			cnt++;
@@ -1043,44 +1060,10 @@ int rsxx_eeh_save_issued_dmas(struct rsxx_cardinfo *card)
 		atomic_sub(cnt, &card->ctrl[i].stats.hw_q_depth);
 		card->ctrl[i].stats.sw_q_depth += cnt;
 		card->ctrl[i].e_cnt = 0;
-
-		list_for_each_entry(dma, &card->ctrl[i].queue, list) {
-			if (dma->dma_addr)
-				pci_unmap_page(card->dev, dma->dma_addr,
-					       get_dma_size(dma),
-					       dma->cmd == HW_CMD_BLK_WRITE ?
-					       PCI_DMA_TODEVICE :
-					       PCI_DMA_FROMDEVICE);
-		}
 		spin_unlock_bh(&card->ctrl[i].queue_lock);
 	}
 
 	kfree(issued_dmas);
-
-	return 0;
-}
-
-int rsxx_eeh_remap_dmas(struct rsxx_cardinfo *card)
-{
-	struct rsxx_dma *dma;
-	int i;
-
-	for (i = 0; i < card->n_targets; i++) {
-		spin_lock_bh(&card->ctrl[i].queue_lock);
-		list_for_each_entry(dma, &card->ctrl[i].queue, list) {
-			dma->dma_addr = pci_map_page(card->dev, dma->page,
-					dma->pg_off, get_dma_size(dma),
-					dma->cmd == HW_CMD_BLK_WRITE ?
-					PCI_DMA_TODEVICE :
-					PCI_DMA_FROMDEVICE);
-			if (!dma->dma_addr) {
-				spin_unlock_bh(&card->ctrl[i].queue_lock);
-				kmem_cache_free(rsxx_dma_pool, dma);
-				return -ENOMEM;
-			}
-		}
-		spin_unlock_bh(&card->ctrl[i].queue_lock);
-	}
 
 	return 0;
 }

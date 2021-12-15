@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/process.c
  *
@@ -11,6 +12,9 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
@@ -31,9 +35,8 @@
 #include <linux/rcupdate.h>
 
 #include <asm/reg.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/hwrpb.h>
 #include <asm/fpu.h>
 
@@ -45,6 +48,23 @@
  */
 void (*pm_power_off)(void) = machine_power_off;
 EXPORT_SYMBOL(pm_power_off);
+
+#ifdef CONFIG_ALPHA_WTINT
+/*
+ * Sleep the CPU.
+ * EV6, LCA45 and QEMU know how to power down, skipping N timer interrupts.
+ */
+void arch_cpu_idle(void)
+{
+	wtint(0);
+	raw_local_irq_enable();
+}
+
+void arch_cpu_idle_dead(void)
+{
+	wtint(INT_MAX);
+}
+#endif /* ALPHA_WTINT */
 
 struct halt_info {
 	int mode;
@@ -114,7 +134,7 @@ common_shutdown_1(void *generic_ptr)
 #ifdef CONFIG_DUMMY_CONSOLE
 		/* If we've gotten here after SysRq-b, leave interrupt
 		   context before taking over the console. */
-		if (in_interrupt())
+		if (in_irq())
 			irq_exit();
 		/* This has the effect of resetting the VGA video origin.  */
 		console_lock();
@@ -193,14 +213,6 @@ start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 }
 EXPORT_SYMBOL(start_thread);
 
-/*
- * Free current thread data structures etc..
- */
-void
-exit_thread(void)
-{
-}
-
 void
 flush_thread(void)
 {
@@ -219,13 +231,11 @@ release_thread(struct task_struct *dead_task)
 }
 
 /*
- * Copy an alpha thread..
+ * Copy architecture-specific thread state
  */
-
-int
-copy_thread(unsigned long clone_flags, unsigned long usp,
-	    unsigned long arg,
-	    struct task_struct *p)
+int copy_thread(unsigned long clone_flags, unsigned long usp,
+		unsigned long kthread_arg, struct task_struct *p,
+		unsigned long tls)
 {
 	extern void ret_from_fork(void);
 	extern void ret_from_kernel_thread(void);
@@ -239,14 +249,14 @@ copy_thread(unsigned long clone_flags, unsigned long usp,
 	childti->pcb.ksp = (unsigned long) childstack;
 	childti->pcb.flags = 1;	/* set FEN, clear everything else */
 
-	if (unlikely(p->flags & PF_KTHREAD)) {
+	if (unlikely(p->flags & (PF_KTHREAD | PF_IO_WORKER))) {
 		/* kernel thread */
 		memset(childstack, 0,
 			sizeof(struct switch_stack) + sizeof(struct pt_regs));
 		childstack->r26 = (unsigned long) ret_from_kernel_thread;
 		childstack->r9 = usp;	/* function */
-		childstack->r10 = arg;
-		childregs->hae = alpha_mv.hae_cache,
+		childstack->r10 = kthread_arg;
+		childregs->hae = alpha_mv.hae_cache;
 		childti->pcb.usp = 0;
 		return 0;
 	}
@@ -256,13 +266,14 @@ copy_thread(unsigned long clone_flags, unsigned long usp,
 	   required for proper operation in the case of a threaded
 	   application calling fork.  */
 	if (clone_flags & CLONE_SETTLS)
-		childti->pcb.unique = regs->r20;
+		childti->pcb.unique = tls;
+	else
+		regs->r20 = 0;	/* OSF/1 has some strange fork() semantics.  */
 	childti->pcb.usp = usp ?: rdusp();
 	*childregs = *regs;
 	childregs->r0 = 0;
 	childregs->r19 = 0;
 	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
-	regs->r20 = 0;
 	stack = ((struct switch_stack *) regs) - 1;
 	*childstack = *stack;
 	childstack->r26 = (unsigned long) ret_from_fork;
@@ -349,7 +360,7 @@ EXPORT_SYMBOL(dump_elf_task_fp);
  * all.  -- r~
  */
 
-unsigned long
+static unsigned long
 thread_saved_pc(struct task_struct *t)
 {
 	unsigned long base = (unsigned long)task_stack_page(t);
@@ -365,12 +376,11 @@ thread_saved_pc(struct task_struct *t)
 }
 
 unsigned long
-get_wchan(struct task_struct *p)
+__get_wchan(struct task_struct *p)
 {
 	unsigned long schedule_frame;
 	unsigned long pc;
-	if (!p || p == current || p->state == TASK_RUNNING)
-		return 0;
+
 	/*
 	 * This one depends on the frame size of schedule().  Do a
 	 * "disass schedule" in gdb to find the frame size.  Also, the

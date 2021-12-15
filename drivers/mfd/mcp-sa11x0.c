@@ -1,18 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/mfd/mcp-sa11x0.c
  *
  *  Copyright (C) 2001-2005 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License.
  *
  *  SA11x0 MCP (Multimedia Communications Port) driver.
  *
  *  MCP read/write timeouts from Jordi Colomer, rehacked by rmk.
  */
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/io.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -156,7 +152,7 @@ static struct mcp_ops mcp_sa11x0 = {
 
 static int mcp_sa11x0_probe(struct platform_device *dev)
 {
-	struct mcp_plat_data *data = dev->dev.platform_data;
+	struct mcp_plat_data *data = dev_get_platdata(&dev->dev);
 	struct resource *mem0, *mem1;
 	struct mcp_sa11x0 *m;
 	struct mcp *mcp;
@@ -218,8 +214,7 @@ static int mcp_sa11x0_probe(struct platform_device *dev)
 	 * rate.  This is the period for 3 64-bit frames.  Always
 	 * round this time up.
 	 */
-	mcp->rw_timeout = (64 * 3 * 1000000 + mcp->sclk_rate - 1) /
-			  mcp->sclk_rate;
+	mcp->rw_timeout = DIV_ROUND_UP(64 * 3 * 1000000, mcp->sclk_rate);
 
 	ret = mcp_host_add(mcp, data->codec_pdata);
 	if (ret == 0)
@@ -300,7 +295,6 @@ static struct platform_driver mcp_sa11x0_driver = {
 	.remove		= mcp_sa11x0_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
 		.pm	= &mcp_sa11x0_pm_ops,
 	},
 };

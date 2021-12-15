@@ -805,6 +805,7 @@ struct set_dev_state_resp {
 #define IO_ABORT_IN_PROGRESS				0x40
 #define IO_ABORT_DELAYED				0x41
 #define IO_INVALID_LENGTH				0x42
+#define IO_FATAL_ERROR					0x51
 
 /* WARNING: This error code must always be the last number.
  * If you add error code, modify this code also
@@ -1027,5 +1028,8 @@ struct set_dev_state_resp {
 #define DEVREG_FAILURE_PORT_NOT_VALID_STATE		0x06
 #define DEVREG_FAILURE_DEVICE_TYPE_NOT_VALID		0x07
 
+#define GSM_BASE					0x4F0000
+#define SHIFT_REG_64K_MASK				0xffff0000
+#define SHIFT_REG_BIT_SHIFT				8
 #endif
 

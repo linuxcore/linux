@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for OHCI 1394 controllers
  *
  * Copyright (C) 2003-2006 Kristian Hoegsberg <krh@bitplanet.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 #include <linux/bitops.h>
@@ -124,7 +111,7 @@ struct descriptor_buffer {
 	dma_addr_t buffer_bus;
 	size_t buffer_size;
 	size_t used;
-	struct descriptor buffer[0];
+	struct descriptor buffer[];
 };
 
 struct context {
@@ -235,12 +222,14 @@ struct fw_ohci {
 	dma_addr_t next_config_rom_bus;
 	__be32     next_header;
 
-	__le32    *self_id_cpu;
+	__le32    *self_id;
 	dma_addr_t self_id_bus;
 	struct work_struct bus_reset_work;
 
 	u32 self_id_buffer[512];
 };
+
+static struct workqueue_struct *selfid_workqueue;
 
 static inline struct fw_ohci *fw_ohci(struct fw_card *card)
 {
@@ -271,6 +260,7 @@ static inline struct fw_ohci *fw_ohci(struct fw_card *card)
 
 static char ohci_driver_name[] = KBUILD_MODNAME;
 
+#define PCI_VENDOR_ID_PINNACLE_SYSTEMS	0x11bd
 #define PCI_DEVICE_ID_AGERE_FW643	0x5901
 #define PCI_DEVICE_ID_CREATIVE_SB1394	0x4001
 #define PCI_DEVICE_ID_JMICRON_JMB38X_FW	0x2380
@@ -278,17 +268,16 @@ static char ohci_driver_name[] = KBUILD_MODNAME;
 #define PCI_DEVICE_ID_TI_TSB12LV26	0x8020
 #define PCI_DEVICE_ID_TI_TSB82AA2	0x8025
 #define PCI_DEVICE_ID_VIA_VT630X	0x3044
-#define PCI_VENDOR_ID_PINNACLE_SYSTEMS	0x11bd
 #define PCI_REV_ID_VIA_VT6306		0x46
+#define PCI_DEVICE_ID_VIA_VT6315	0x3403
 
-#define QUIRK_CYCLE_TIMER		1
-#define QUIRK_RESET_PACKET		2
-#define QUIRK_BE_HEADERS		4
-#define QUIRK_NO_1394A			8
-#define QUIRK_NO_MSI			16
-#define QUIRK_TI_SLLZ059		32
-#define QUIRK_IR_WAKE			64
-#define QUIRK_PHY_LCTRL_TIMEOUT		128
+#define QUIRK_CYCLE_TIMER		0x1
+#define QUIRK_RESET_PACKET		0x2
+#define QUIRK_BE_HEADERS		0x4
+#define QUIRK_NO_1394A			0x8
+#define QUIRK_NO_MSI			0x10
+#define QUIRK_TI_SLLZ059		0x20
+#define QUIRK_IR_WAKE			0x40
 
 /* In case of multiple matches in ohci_quirks[], only the first one is used. */
 static const struct {
@@ -301,10 +290,7 @@ static const struct {
 		QUIRK_BE_HEADERS},
 
 	{PCI_VENDOR_ID_ATT, PCI_DEVICE_ID_AGERE_FW643, 6,
-		QUIRK_PHY_LCTRL_TIMEOUT | QUIRK_NO_MSI},
-
-	{PCI_VENDOR_ID_ATT, PCI_ANY_ID, PCI_ANY_ID,
-		QUIRK_PHY_LCTRL_TIMEOUT},
+		QUIRK_NO_MSI},
 
 	{PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_SB1394, PCI_ANY_ID,
 		QUIRK_RESET_PACKET},
@@ -336,6 +322,12 @@ static const struct {
 	{PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT630X, PCI_REV_ID_VIA_VT6306,
 		QUIRK_CYCLE_TIMER | QUIRK_IR_WAKE},
 
+	{PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT6315, 0,
+		QUIRK_CYCLE_TIMER /* FIXME: necessary? */ | QUIRK_NO_MSI},
+
+	{PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT6315, PCI_ANY_ID,
+		QUIRK_NO_MSI},
+
 	{PCI_VENDOR_ID_VIA, PCI_ANY_ID, PCI_ANY_ID,
 		QUIRK_CYCLE_TIMER | QUIRK_NO_MSI},
 };
@@ -351,7 +343,6 @@ MODULE_PARM_DESC(quirks, "Chip quirks (default = 0"
 	", disable MSI = "		__stringify(QUIRK_NO_MSI)
 	", TI SLLZ059 erratum = "	__stringify(QUIRK_TI_SLLZ059)
 	", IR wake unreliable = "	__stringify(QUIRK_IR_WAKE)
-	", phy LCtrl timeout = "	__stringify(QUIRK_PHY_LCTRL_TIMEOUT)
 	")");
 
 #define OHCI_PARAM_DEBUG_AT_AR		1
@@ -367,6 +358,10 @@ MODULE_PARM_DESC(debug, "Verbose logging (default = 0"
 	", IRQs = "		__stringify(OHCI_PARAM_DEBUG_IRQS)
 	", busReset events = "	__stringify(OHCI_PARAM_DEBUG_BUSRESETS)
 	", or a combination, or all = -1)");
+
+static bool param_remote_dma;
+module_param_named(remote_dma, param_remote_dma, bool, 0444);
+MODULE_PARM_DESC(remote_dma, "Enable unfiltered remote DMA (default = N)");
 
 static void log_irqs(struct fw_ohci *ohci, u32 evt)
 {
@@ -679,18 +674,16 @@ static void ar_context_link_page(struct ar_context *ctx, unsigned int index)
 
 static void ar_context_release(struct ar_context *ctx)
 {
+	struct device *dev = ctx->ohci->card.device;
 	unsigned int i;
 
-	if (ctx->buffer)
-		vm_unmap_ram(ctx->buffer, AR_BUFFERS + AR_WRAPAROUND_PAGES);
+	vunmap(ctx->buffer);
 
-	for (i = 0; i < AR_BUFFERS; i++)
-		if (ctx->pages[i]) {
-			dma_unmap_page(ctx->ohci->card.device,
-				       ar_buffer_bus(ctx, i),
-				       PAGE_SIZE, DMA_FROM_DEVICE);
-			__free_page(ctx->pages[i]);
-		}
+	for (i = 0; i < AR_BUFFERS; i++) {
+		if (ctx->pages[i])
+			dma_free_pages(dev, PAGE_SIZE, ctx->pages[i],
+				       ar_buffer_bus(ctx, i), DMA_FROM_DEVICE);
+	}
 }
 
 static void ar_context_abort(struct ar_context *ctx, const char *error_msg)
@@ -711,11 +704,6 @@ static inline unsigned int ar_next_buffer_index(unsigned int index)
 	return (index + 1) % AR_BUFFERS;
 }
 
-static inline unsigned int ar_prev_buffer_index(unsigned int index)
-{
-	return (index - 1 + AR_BUFFERS) % AR_BUFFERS;
-}
-
 static inline unsigned int ar_first_buffer_index(struct ar_context *ctx)
 {
 	return ar_next_buffer_index(ctx->last_buffer_index);
@@ -732,7 +720,7 @@ static unsigned int ar_search_last_active_buffer(struct ar_context *ctx,
 	__le16 res_count, next_res_count;
 
 	i = ar_first_buffer_index(ctx);
-	res_count = ACCESS_ONCE(ctx->descriptors[i].res_count);
+	res_count = READ_ONCE(ctx->descriptors[i].res_count);
 
 	/* A buffer that is not yet completely filled must be the last one. */
 	while (i != last && res_count == 0) {
@@ -740,8 +728,7 @@ static unsigned int ar_search_last_active_buffer(struct ar_context *ctx,
 		/* Peek at the next descriptor. */
 		next_i = ar_next_buffer_index(i);
 		rmb(); /* read descriptors in order */
-		next_res_count = ACCESS_ONCE(
-				ctx->descriptors[next_i].res_count);
+		next_res_count = READ_ONCE(ctx->descriptors[next_i].res_count);
 		/*
 		 * If the next descriptor is still empty, we must stop at this
 		 * descriptor.
@@ -757,8 +744,7 @@ static unsigned int ar_search_last_active_buffer(struct ar_context *ctx,
 			if (MAX_AR_PACKET_SIZE > PAGE_SIZE && i != last) {
 				next_i = ar_next_buffer_index(next_i);
 				rmb();
-				next_res_count = ACCESS_ONCE(
-					ctx->descriptors[next_i].res_count);
+				next_res_count = READ_ONCE(ctx->descriptors[next_i].res_count);
 				if (next_res_count != cpu_to_le16(PAGE_SIZE))
 					goto next_buffer_is_active;
 			}
@@ -983,6 +969,7 @@ error:
 static int ar_context_init(struct ar_context *ctx, struct fw_ohci *ohci,
 			   unsigned int descriptors_offset, u32 regs)
 {
+	struct device *dev = ohci->card.device;
 	unsigned int i;
 	dma_addr_t dma_addr;
 	struct page *pages[AR_BUFFERS + AR_WRAPAROUND_PAGES];
@@ -993,25 +980,20 @@ static int ar_context_init(struct ar_context *ctx, struct fw_ohci *ohci,
 	tasklet_init(&ctx->tasklet, ar_context_tasklet, (unsigned long)ctx);
 
 	for (i = 0; i < AR_BUFFERS; i++) {
-		ctx->pages[i] = alloc_page(GFP_KERNEL | GFP_DMA32);
+		ctx->pages[i] = dma_alloc_pages(dev, PAGE_SIZE, &dma_addr,
+						DMA_FROM_DEVICE, GFP_KERNEL);
 		if (!ctx->pages[i])
 			goto out_of_memory;
-		dma_addr = dma_map_page(ohci->card.device, ctx->pages[i],
-					0, PAGE_SIZE, DMA_FROM_DEVICE);
-		if (dma_mapping_error(ohci->card.device, dma_addr)) {
-			__free_page(ctx->pages[i]);
-			ctx->pages[i] = NULL;
-			goto out_of_memory;
-		}
 		set_page_private(ctx->pages[i], dma_addr);
+		dma_sync_single_for_device(dev, dma_addr, PAGE_SIZE,
+					   DMA_FROM_DEVICE);
 	}
 
 	for (i = 0; i < AR_BUFFERS; i++)
 		pages[i]              = ctx->pages[i];
 	for (i = 0; i < AR_WRAPAROUND_PAGES; i++)
 		pages[AR_BUFFERS + i] = ctx->pages[i];
-	ctx->buffer = vm_map_ram(pages, AR_BUFFERS + AR_WRAPAROUND_PAGES,
-				 -1, PAGE_KERNEL);
+	ctx->buffer = vmap(pages, ARRAY_SIZE(pages), VM_MAP, PAGE_KERNEL);
 	if (!ctx->buffer)
 		goto out_of_memory;
 
@@ -1113,7 +1095,7 @@ static void context_tasklet(unsigned long data)
 static int context_add_buffer(struct context *ctx)
 {
 	struct descriptor_buffer *desc;
-	dma_addr_t uninitialized_var(bus_addr);
+	dma_addr_t bus_addr;
 	int offset;
 
 	/*
@@ -1129,7 +1111,13 @@ static int context_add_buffer(struct context *ctx)
 		return -ENOMEM;
 
 	offset = (void *)&desc->buffer - (void *)desc;
-	desc->buffer_size = PAGE_SIZE - offset;
+	/*
+	 * Some controllers, like JMicron ones, always issue 0x20-byte DMA reads
+	 * for descriptors, even 0x10-byte ones. This can cause page faults when
+	 * an IOMMU is in use and the oversized read crosses a page boundary.
+	 * Work around this by always leaving at least 0x10 bytes of padding.
+	 */
+	desc->buffer_size = PAGE_SIZE - offset - 0x10;
 	desc->buffer_bus = bus_addr + offset;
 	desc->used = 0;
 
@@ -1297,7 +1285,7 @@ static int at_context_queue_packet(struct context *ctx,
 				   struct fw_packet *packet)
 {
 	struct fw_ohci *ohci = ctx->ohci;
-	dma_addr_t d_bus, uninitialized_var(payload_bus);
+	dma_addr_t d_bus, payload_bus;
 	struct driver_data *driver_data;
 	struct descriptor *d, *last;
 	__le32 *header;
@@ -1503,7 +1491,7 @@ static int handle_at_packet(struct context *context,
 			packet->ack = RCODE_GENERATION;
 			break;
 		}
-		/* fall through */
+		fallthrough;
 
 	default:
 		packet->ack = RCODE_SEND_ERROR;
@@ -1760,7 +1748,7 @@ static u32 update_bus_time(struct fw_ohci *ohci)
 
 	if (unlikely(!ohci->bus_time_running)) {
 		reg_write(ohci, OHCI1394_IntMaskSet, OHCI1394_cycle64Seconds);
-		ohci->bus_time = (lower_32_bits(get_seconds()) & ~0x7f) |
+		ohci->bus_time = (lower_32_bits(ktime_get_seconds()) & ~0x7f) |
 		                 (cycle_time_seconds & 0x40);
 		ohci->bus_time_running = true;
 	}
@@ -1929,12 +1917,12 @@ static void bus_reset_work(struct work_struct *work)
 		return;
 	}
 
-	generation = (cond_le32_to_cpu(ohci->self_id_cpu[0]) >> 16) & 0xff;
+	generation = (cond_le32_to_cpu(ohci->self_id[0]) >> 16) & 0xff;
 	rmb();
 
 	for (i = 1, j = 0; j < self_id_count; i += 2, j++) {
-		u32 id  = cond_le32_to_cpu(ohci->self_id_cpu[i]);
-		u32 id2 = cond_le32_to_cpu(ohci->self_id_cpu[i + 1]);
+		u32 id  = cond_le32_to_cpu(ohci->self_id[i]);
+		u32 id2 = cond_le32_to_cpu(ohci->self_id[i + 1]);
 
 		if (id != ~id2) {
 			/*
@@ -2048,10 +2036,10 @@ static void bus_reset_work(struct work_struct *work)
 			  be32_to_cpu(ohci->next_header));
 	}
 
-#ifdef CONFIG_FIREWIRE_OHCI_REMOTE_DMA
-	reg_write(ohci, OHCI1394_PhyReqFilterHiSet, ~0);
-	reg_write(ohci, OHCI1394_PhyReqFilterLoSet, ~0);
-#endif
+	if (param_remote_dma) {
+		reg_write(ohci, OHCI1394_PhyReqFilterHiSet, ~0);
+		reg_write(ohci, OHCI1394_PhyReqFilterLoSet, ~0);
+	}
 
 	spin_unlock_irq(&ohci->lock);
 
@@ -2087,7 +2075,7 @@ static irqreturn_t irq_handler(int irq, void *data)
 	log_irqs(ohci, event);
 
 	if (event & OHCI1394_selfIDComplete)
-		queue_work(fw_workqueue, &ohci->bus_reset_work);
+		queue_work(selfid_workqueue, &ohci->bus_reset_work);
 
 	if (event & OHCI1394_RQPkt)
 		tasklet_schedule(&ohci->ar_request_ctx.tasklet);
@@ -2277,9 +2265,10 @@ static int ohci_enable(struct fw_card *card,
 	u32 lps, version, irqs;
 	int i, ret;
 
-	if (software_reset(ohci)) {
+	ret = software_reset(ohci);
+	if (ret < 0) {
 		ohci_err(ohci, "failed to reset ohci card\n");
-		return -EBUSY;
+		return ret;
 	}
 
 	/*
@@ -2293,9 +2282,6 @@ static int ohci_enable(struct fw_card *card,
 	 * TI TSB82AA2 + TSB81BA3(A) cards signal LPS enabled early but
 	 * cannot actually use the phy at that time.  These need tens of
 	 * millisecods pause between LPS write and first phy access too.
-	 *
-	 * But do not wait for 50msec on Agere/LSI cards.  Their phy
-	 * arbitration state machine may time out during such a long wait.
 	 */
 
 	reg_write(ohci, OHCI1394_HCControlSet,
@@ -2303,11 +2289,8 @@ static int ohci_enable(struct fw_card *card,
 		  OHCI1394_HCControl_postedWriteEnable);
 	flush_writes(ohci);
 
-	if (!(ohci->quirks & QUIRK_PHY_LCTRL_TIMEOUT))
+	for (lps = 0, i = 0; !lps && i < 3; i++) {
 		msleep(50);
-
-	for (lps = 0, i = 0; !lps && i < 150; i++) {
-		msleep(1);
 		lps = reg_read(ohci, OHCI1394_HCControlSet) &
 		      OHCI1394_HCControl_LPS;
 	}
@@ -2361,7 +2344,7 @@ static int ohci_enable(struct fw_card *card,
 	reg_write(ohci, OHCI1394_FairnessControl, 0);
 	card->priority_budget_implemented = ohci->pri_req_max != 0;
 
-	reg_write(ohci, OHCI1394_PhyUpperBound, 0x00010000);
+	reg_write(ohci, OHCI1394_PhyUpperBound, FW_MAX_PHYSICAL_RANGE >> 16);
 	reg_write(ohci, OHCI1394_IntEventClear, ~0);
 	reg_write(ohci, OHCI1394_IntMaskClear, ~0);
 
@@ -2458,7 +2441,7 @@ static int ohci_set_config_rom(struct fw_card *card,
 {
 	struct fw_ohci *ohci;
 	__be32 *next_config_rom;
-	dma_addr_t uninitialized_var(next_config_rom_bus);
+	dma_addr_t next_config_rom_bus;
 
 	ohci = fw_ohci(card);
 
@@ -2562,7 +2545,7 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
 	struct driver_data *driver_data = packet->driver_data;
 	int ret = -ENOENT;
 
-	tasklet_disable(&ctx->tasklet);
+	tasklet_disable_in_atomic(&ctx->tasklet);
 
 	if (packet->ack != 0)
 		goto out;
@@ -2585,12 +2568,12 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
 static int ohci_enable_phys_dma(struct fw_card *card,
 				int node_id, int generation)
 {
-#ifdef CONFIG_FIREWIRE_OHCI_REMOTE_DMA
-	return 0;
-#else
 	struct fw_ohci *ohci = fw_ohci(card);
 	unsigned long flags;
 	int n, ret = 0;
+
+	if (param_remote_dma)
+		return 0;
 
 	/*
 	 * FIXME:  Make sure this bitmask is cleared when we clear the busReset
@@ -2620,7 +2603,6 @@ static int ohci_enable_phys_dma(struct fw_card *card,
 	spin_unlock_irqrestore(&ohci->lock, flags);
 
 	return ret;
-#endif /* CONFIG_FIREWIRE_OHCI_REMOTE_DMA */
 }
 
 static u32 ohci_read_csr(struct fw_card *card, int csr_offset)
@@ -2817,7 +2799,7 @@ static int handle_ir_buffer_fill(struct context *context,
 	u32 buffer_dma;
 
 	req_count = le16_to_cpu(last->req_count);
-	res_count = le16_to_cpu(ACCESS_ONCE(last->res_count));
+	res_count = le16_to_cpu(READ_ONCE(last->res_count));
 	completed = req_count - res_count;
 	buffer_dma = le32_to_cpu(last->data_address);
 
@@ -2940,7 +2922,6 @@ static void set_multichannel_mask(struct fw_ohci *ohci, u64 channels)
 	reg_write(ohci, OHCI1394_IRMultiChanMaskLoClear, ~lo);
 	reg_write(ohci, OHCI1394_IRMultiChanMaskHiSet, hi);
 	reg_write(ohci, OHCI1394_IRMultiChanMaskLoSet, lo);
-	mmiowb();
 	ohci->mc_channels = channels;
 }
 
@@ -2948,10 +2929,10 @@ static struct fw_iso_context *ohci_allocate_iso_context(struct fw_card *card,
 				int type, int channel, size_t header_size)
 {
 	struct fw_ohci *ohci = fw_ohci(card);
-	struct iso_context *uninitialized_var(ctx);
-	descriptor_callback_t uninitialized_var(callback);
-	u64 *uninitialized_var(channels);
-	u32 *uninitialized_var(mask), uninitialized_var(regs);
+	struct iso_context *ctx;
+	descriptor_callback_t callback;
+	u64 *channels;
+	u32 *mask, regs;
 	int index, ret = -EBUSY;
 
 	spin_lock_irq(&ohci->lock);
@@ -3069,7 +3050,7 @@ static int ohci_start_iso(struct fw_iso_context *base,
 
 	case FW_ISO_CONTEXT_RECEIVE_MULTICHANNEL:
 		control |= IR_CONTEXT_BUFFER_FILL|IR_CONTEXT_MULTI_CHANNEL_MODE;
-		/* fall through */
+		fallthrough;
 	case FW_ISO_CONTEXT_RECEIVE:
 		index = ctx - ohci->ir_context_list;
 		match = (tags << 28) | (sync << 8) | ctx->base.channel;
@@ -3484,7 +3465,7 @@ static int ohci_flush_iso_completions(struct fw_iso_context *base)
 	struct iso_context *ctx = container_of(base, struct iso_context, base);
 	int ret = 0;
 
-	tasklet_disable(&ctx->context.tasklet);
+	tasklet_disable_in_atomic(&ctx->context.tasklet);
 
 	if (!test_and_set_bit_lock(0, &ctx->flushing_completions)) {
 		context_tasklet((unsigned long)&ctx->context);
@@ -3504,7 +3485,7 @@ static int ohci_flush_iso_completions(struct fw_iso_context *base)
 		}
 
 		clear_bit_unlock(0, &ctx->flushing_completions);
-		smp_mb__after_clear_bit();
+		smp_mb__after_atomic();
 	}
 
 	tasklet_enable(&ctx->context.tasklet);
@@ -3681,6 +3662,11 @@ static int pci_probe(struct pci_dev *dev,
 
 	reg_write(ohci, OHCI1394_IsoXmitIntMaskSet, ~0);
 	ohci->it_context_support = reg_read(ohci, OHCI1394_IsoXmitIntMaskSet);
+	/* JMicron JMB38x often shows 0 at first read, just ignore it */
+	if (!ohci->it_context_support) {
+		ohci_notice(ohci, "overriding IsoXmitIntMask\n");
+		ohci->it_context_support = 0xf;
+	}
 	reg_write(ohci, OHCI1394_IsoXmitIntMaskClear, ~0);
 	ohci->it_context_mask = ohci->it_context_support;
 	ohci->n_it = hweight32(ohci->it_context_mask);
@@ -3692,7 +3678,7 @@ static int pci_probe(struct pci_dev *dev,
 		goto fail_contexts;
 	}
 
-	ohci->self_id_cpu = ohci->misc_buffer     + PAGE_SIZE/2;
+	ohci->self_id     = ohci->misc_buffer     + PAGE_SIZE/2;
 	ohci->self_id_bus = ohci->misc_buffer_bus + PAGE_SIZE/2;
 
 	bus_options = reg_read(ohci, OHCI1394_BusOptions);
@@ -3718,9 +3704,11 @@ static int pci_probe(struct pci_dev *dev,
 	version = reg_read(ohci, OHCI1394_Version) & 0x00ff00ff;
 	ohci_notice(ohci,
 		    "added OHCI v%x.%x device as card %d, "
-		    "%d IR + %d IT contexts, quirks 0x%x\n",
+		    "%d IR + %d IT contexts, quirks 0x%x%s\n",
 		    version >> 16, version & 0xff, ohci->card.index,
-		    ohci->n_ir, ohci->n_it, ohci->quirks);
+		    ohci->n_ir, ohci->n_it, ohci->quirks,
+		    reg_read(ohci, OHCI1394_PhyUpperBound) ?
+			", physUB" : "");
 
 	return 0;
 
@@ -3870,7 +3858,23 @@ static struct pci_driver fw_ohci_pci_driver = {
 #endif
 };
 
-module_pci_driver(fw_ohci_pci_driver);
+static int __init fw_ohci_init(void)
+{
+	selfid_workqueue = alloc_workqueue(KBUILD_MODNAME, WQ_MEM_RECLAIM, 0);
+	if (!selfid_workqueue)
+		return -ENOMEM;
+
+	return pci_register_driver(&fw_ohci_pci_driver);
+}
+
+static void __exit fw_ohci_cleanup(void)
+{
+	pci_unregister_driver(&fw_ohci_pci_driver);
+	destroy_workqueue(selfid_workqueue);
+}
+
+module_init(fw_ohci_init);
+module_exit(fw_ohci_cleanup);
 
 MODULE_AUTHOR("Kristian Hoegsberg <krh@bitplanet.net>");
 MODULE_DESCRIPTION("Driver for PCI OHCI IEEE1394 controllers");

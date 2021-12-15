@@ -73,9 +73,9 @@ static int enic_set_port_profile(struct enic *enic, int vf)
 	struct vic_provinfo *vp;
 	const u8 oui[3] = VIC_PROVINFO_CISCO_OUI;
 	const __be16 os_type = htons(VIC_GENERIC_PROV_OS_TYPE_LINUX);
+	const u8 *client_mac;
 	char uuid_str[38];
 	char client_mac_str[18];
-	u8 *client_mac;
 	int err;
 
 	ENIC_PP_BY_INDEX(enic, vf, pp, &err);
@@ -162,7 +162,7 @@ static int enic_are_pp_different(struct enic_port_profile *pp1,
 	return strcmp(pp1->name, pp2->name) | !!memcmp(pp1->instance_uuid,
 		pp2->instance_uuid, PORT_UUID_MAX) |
 		!!memcmp(pp1->host_uuid, pp2->host_uuid, PORT_UUID_MAX) |
-		!!memcmp(pp1->mac_addr, pp2->mac_addr, ETH_ALEN);
+		!ether_addr_equal(pp1->mac_addr, pp2->mac_addr);
 }
 
 static int enic_pp_preassociate(struct enic *enic, int vf,

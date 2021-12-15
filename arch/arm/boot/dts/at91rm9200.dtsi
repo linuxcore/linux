@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * at91rm9200.dtsi - Device Tree Include file for AT91RM9200 family SoC
  *
@@ -6,16 +7,16 @@
  *                2012 Joachim Eastwood <manabian@gmail.com>
  *
  * Based on at91sam9260.dtsi
- *
- * Licensed under GPLv2 or later.
  */
 
-#include "skeleton.dtsi"
 #include <dt-bindings/pinctrl/at91.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/clock/at91.h>
 
 / {
+	#address-cells = <1>;
+	#size-cells = <1>;
 	model = "Atmel AT91RM9200 family SoC";
 	compatible = "atmel,at91rm9200";
 	interrupt-parent = <&aic>;
@@ -38,17 +39,41 @@
 		ssc2 = &ssc2;
 	};
 	cpus {
-		#address-cells = <0>;
+		#address-cells = <1>;
 		#size-cells = <0>;
 
-		cpu {
+		cpu@0 {
 			compatible = "arm,arm920t";
 			device_type = "cpu";
+			reg = <0>;
 		};
 	};
 
-	memory {
+	memory@20000000 {
+		device_type = "memory";
 		reg = <0x20000000 0x04000000>;
+	};
+
+	clocks {
+		slow_xtal: slow_xtal {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <0>;
+		};
+
+		main_xtal: main_xtal {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <0>;
+		};
+	};
+
+	sram: sram@200000 {
+		compatible = "mmio-sram";
+		reg = <0x00200000 0x4000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0 0x00200000 0x4000>;
 	};
 
 	ahb {
@@ -72,35 +97,60 @@
 			};
 
 			ramc0: ramc@ffffff00 {
-				compatible = "atmel,at91rm9200-sdramc";
+				compatible = "atmel,at91rm9200-sdramc", "syscon";
 				reg = <0xffffff00 0x100>;
 			};
 
 			pmc: pmc@fffffc00 {
-				compatible = "atmel,at91rm9200-pmc";
+				compatible = "atmel,at91rm9200-pmc", "syscon";
 				reg = <0xfffffc00 0x100>;
+				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
+				#clock-cells = <2>;
+				clocks = <&slow_xtal>, <&main_xtal>;
+				clock-names = "slow_xtal", "main_xtal";
 			};
 
 			st: timer@fffffd00 {
-				compatible = "atmel,at91rm9200-st";
+				compatible = "atmel,at91rm9200-st", "syscon", "simple-mfd";
 				reg = <0xfffffd00 0x100>;
 				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
+				clocks = <&slow_xtal>;
+
+				watchdog {
+					compatible = "atmel,at91rm9200-wdt";
+				};
+			};
+
+			rtc: rtc@fffffe00 {
+				compatible = "atmel,at91rm9200-rtc";
+				reg = <0xfffffe00 0x40>;
+				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
+				clocks = <&slow_xtal>;
+				status = "disabled";
 			};
 
 			tcb0: timer@fffa0000 {
-				compatible = "atmel,at91rm9200-tcb";
+				compatible = "atmel,at91rm9200-tcb", "simple-mfd", "syscon";
+				#address-cells = <1>;
+				#size-cells = <0>;
 				reg = <0xfffa0000 0x100>;
 				interrupts = <17 IRQ_TYPE_LEVEL_HIGH 0
 					      18 IRQ_TYPE_LEVEL_HIGH 0
 					      19 IRQ_TYPE_LEVEL_HIGH 0>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 17>, <&pmc PMC_TYPE_PERIPHERAL 18>, <&pmc PMC_TYPE_PERIPHERAL 19>, <&slow_xtal>;
+				clock-names = "t0_clk", "t1_clk", "t2_clk", "slow_clk";
 			};
 
 			tcb1: timer@fffa4000 {
-				compatible = "atmel,at91rm9200-tcb";
+				compatible = "atmel,at91rm9200-tcb", "simple-mfd", "syscon";
+				#address-cells = <1>;
+				#size-cells = <0>;
 				reg = <0xfffa4000 0x100>;
 				interrupts = <20 IRQ_TYPE_LEVEL_HIGH 0
 					      21 IRQ_TYPE_LEVEL_HIGH 0
 					      22 IRQ_TYPE_LEVEL_HIGH 0>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 20>, <&pmc PMC_TYPE_PERIPHERAL 21>, <&pmc PMC_TYPE_PERIPHERAL 22>, <&slow_xtal>;
+				clock-names = "t0_clk", "t1_clk", "t2_clk", "slow_clk";
 			};
 
 			i2c0: i2c@fffb8000 {
@@ -109,6 +159,7 @@
 				interrupts = <12 IRQ_TYPE_LEVEL_HIGH 6>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_twi>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 12>;
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "disabled";
@@ -118,6 +169,8 @@
 				compatible = "atmel,hsmci";
 				reg = <0xfffb4000 0x4000>;
 				interrupts = <10 IRQ_TYPE_LEVEL_HIGH 0>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 10>;
+				clock-names = "mci_clk";
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "disabled";
@@ -129,7 +182,9 @@
 				interrupts = <14 IRQ_TYPE_LEVEL_HIGH 5>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_ssc0_tx &pinctrl_ssc0_rx>;
-				status = "disable";
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 14>;
+				clock-names = "pclk";
+				status = "disabled";
 			};
 
 			ssc1: ssc@fffd4000 {
@@ -138,7 +193,9 @@
 				interrupts = <15 IRQ_TYPE_LEVEL_HIGH 5>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_ssc1_tx &pinctrl_ssc1_rx>;
-				status = "disable";
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 15>;
+				clock-names = "pclk";
+				status = "disabled";
 			};
 
 			ssc2: ssc@fffd8000 {
@@ -147,7 +204,9 @@
 				interrupts = <16 IRQ_TYPE_LEVEL_HIGH 5>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_ssc2_tx &pinctrl_ssc2_rx>;
-				status = "disable";
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 16>;
+				clock-names = "pclk";
+				status = "disabled";
 			};
 
 			macb0: ethernet@fffbc000 {
@@ -157,6 +216,8 @@
 				phy-mode = "rmii";
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_macb_rmii>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 24>;
+				clock-names = "ether_clk";
 				status = "disabled";
 			};
 
@@ -178,24 +239,24 @@
 				dbgu {
 					pinctrl_dbgu: dbgu-0 {
 						atmel,pins =
-							<AT91_PIOA 30 AT91_PERIPH_A AT91_PINCTRL_NONE	/* PA30 periph A */
-							 AT91_PIOA 31 AT91_PERIPH_A AT91_PINCTRL_PULL_UP>;	/* PA31 periph with pullup */
+							<AT91_PIOA 30 AT91_PERIPH_A AT91_PINCTRL_PULL_UP
+							 AT91_PIOA 31 AT91_PERIPH_A AT91_PINCTRL_NONE>;
 					};
 				};
 
 				uart0 {
 					pinctrl_uart0: uart0-0 {
 						atmel,pins =
-							<AT91_PIOA 17 AT91_PERIPH_A AT91_PINCTRL_NONE	/* PA17 periph A */
-							 AT91_PIOA 18 AT91_PERIPH_A AT91_PINCTRL_NONE>;	/* PA18 periph A */
+							<AT91_PIOA 17 AT91_PERIPH_A AT91_PINCTRL_NONE
+							 AT91_PIOA 18 AT91_PERIPH_A AT91_PINCTRL_PULL_UP>;
 					};
 
-					pinctrl_uart0_rts: uart0_rts-0 {
+					pinctrl_uart0_cts: uart0_cts-0 {
 						atmel,pins =
 							<AT91_PIOA 20 AT91_PERIPH_A AT91_PINCTRL_NONE>;	/* PA20 periph A */
 					};
 
-					pinctrl_uart0_cts: uart0_cts-0 {
+					pinctrl_uart0_rts: uart0_rts-0 {
 						atmel,pins =
 							<AT91_PIOA 21 AT91_PERIPH_A AT91_PINCTRL_NONE>;	/* PA21 periph A */
 					};
@@ -204,8 +265,8 @@
 				uart1 {
 					pinctrl_uart1: uart1-0 {
 						atmel,pins =
-							<AT91_PIOB 20 AT91_PERIPH_A AT91_PINCTRL_PULL_UP	/* PB20 periph A with pullup */
-							 AT91_PIOB 21 AT91_PERIPH_A AT91_PINCTRL_NONE>;	/* PB21 periph A */
+							<AT91_PIOB 20 AT91_PERIPH_A AT91_PINCTRL_NONE
+							 AT91_PIOB 21 AT91_PERIPH_A AT91_PINCTRL_PULL_UP>;
 					};
 
 					pinctrl_uart1_rts: uart1_rts-0 {
@@ -238,8 +299,8 @@
 				uart2 {
 					pinctrl_uart2: uart2-0 {
 						atmel,pins =
-							<AT91_PIOA 22 AT91_PERIPH_A AT91_PINCTRL_NONE	/* PA22 periph A */
-							 AT91_PIOA 23 AT91_PERIPH_A AT91_PINCTRL_PULL_UP>;	/* PA23 periph A with pullup */
+							<AT91_PIOA 22 AT91_PERIPH_A AT91_PINCTRL_PULL_UP
+							 AT91_PIOA 23 AT91_PERIPH_A AT91_PINCTRL_NONE>;
 					};
 
 					pinctrl_uart2_rts: uart2_rts-0 {
@@ -256,8 +317,8 @@
 				uart3 {
 					pinctrl_uart3: uart3-0 {
 						atmel,pins =
-							<AT91_PIOA 5 AT91_PERIPH_B AT91_PINCTRL_PULL_UP	/* PA5 periph B with pullup */
-							 AT91_PIOA 6 AT91_PERIPH_B AT91_PINCTRL_NONE>;	/* PA6 periph B */
+							<AT91_PIOA 5 AT91_PERIPH_B AT91_PINCTRL_NONE
+							 AT91_PIOA 6 AT91_PERIPH_B AT91_PINCTRL_PULL_UP>;
 					};
 
 					pinctrl_uart3_rts: uart3_rts-0 {
@@ -495,6 +556,7 @@
 					gpio-controller;
 					interrupt-controller;
 					#interrupt-cells = <2>;
+					clocks = <&pmc PMC_TYPE_PERIPHERAL 2>;
 				};
 
 				pioB: gpio@fffff600 {
@@ -505,6 +567,7 @@
 					gpio-controller;
 					interrupt-controller;
 					#interrupt-cells = <2>;
+					clocks = <&pmc PMC_TYPE_PERIPHERAL 3>;
 				};
 
 				pioC: gpio@fffff800 {
@@ -515,6 +578,7 @@
 					gpio-controller;
 					interrupt-controller;
 					#interrupt-cells = <2>;
+					clocks = <&pmc PMC_TYPE_PERIPHERAL 4>;
 				};
 
 				pioD: gpio@fffffa00 {
@@ -525,15 +589,18 @@
 					gpio-controller;
 					interrupt-controller;
 					#interrupt-cells = <2>;
+					clocks = <&pmc PMC_TYPE_PERIPHERAL 5>;
 				};
 			};
 
 			dbgu: serial@fffff200 {
-				compatible = "atmel,at91rm9200-usart";
+				compatible = "atmel,at91rm9200-dbgu", "atmel,at91rm9200-usart";
 				reg = <0xfffff200 0x200>;
 				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_dbgu>;
+				clocks = <&pmc PMC_TYPE_CORE PMC_MCK>;
+				clock-names = "usart";
 				status = "disabled";
 			};
 
@@ -545,6 +612,8 @@
 				atmel,use-dma-tx;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_uart0>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 6>;
+				clock-names = "usart";
 				status = "disabled";
 			};
 
@@ -556,6 +625,8 @@
 				atmel,use-dma-tx;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_uart1>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 7>;
+				clock-names = "usart";
 				status = "disabled";
 			};
 
@@ -567,6 +638,8 @@
 				atmel,use-dma-tx;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_uart2>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 8>;
+				clock-names = "usart";
 				status = "disabled";
 			};
 
@@ -578,6 +651,8 @@
 				atmel,use-dma-tx;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_uart3>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 9>;
+				clock-names = "usart";
 				status = "disabled";
 			};
 
@@ -585,6 +660,8 @@
 				compatible = "atmel,at91rm9200-udc";
 				reg = <0xfffb0000 0x4000>;
 				interrupts = <11 IRQ_TYPE_LEVEL_HIGH 2>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 11>, <&pmc PMC_TYPE_SYSTEM 2>;
+				clock-names = "pclk", "hclk";
 				status = "disabled";
 			};
 
@@ -596,6 +673,8 @@
 				interrupts = <13 IRQ_TYPE_LEVEL_HIGH 3>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_spi0>;
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 13>;
+				clock-names = "spi_clk";
 				status = "disabled";
 			};
 		};
@@ -617,15 +696,17 @@
 			status = "disabled";
 		};
 
-		usb0: ohci@00300000 {
+		usb0: ohci@300000 {
 			compatible = "atmel,at91rm9200-ohci", "usb-ohci";
 			reg = <0x00300000 0x100000>;
 			interrupts = <23 IRQ_TYPE_LEVEL_HIGH 2>;
+			clocks = <&pmc PMC_TYPE_PERIPHERAL 23>, <&pmc PMC_TYPE_PERIPHERAL 23>, <&pmc PMC_TYPE_SYSTEM 4>;
+			clock-names = "ohci_clk", "hclk", "uhpck";
 			status = "disabled";
 		};
 	};
 
-	i2c@0 {
+	i2c-gpio-0 {
 		compatible = "i2c-gpio";
 		gpios = <&pioA 25 GPIO_ACTIVE_HIGH /* sda */
 			 &pioA 26 GPIO_ACTIVE_HIGH /* scl */

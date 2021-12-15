@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * wm8991.h  --  audio driver for WM8991
  *
  * Copyright 2007 Wolfson Microelectronics PLC.
  * Author: Graeme Gregory
  *         graeme.gregory@wolfsonmicro.com or linux@wolfsonmicro.com
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
  */
 
 #ifndef _WM8991_H
@@ -76,7 +72,6 @@
 #define WM8991_PLL1                             0x3C
 #define WM8991_PLL2                             0x3D
 #define WM8991_PLL3                             0x3E
-#define WM8991_INTDRIVBITS			0x3F
 
 #define WM8991_REGISTER_COUNT                   60
 #define WM8991_MAX_REGISTER                     0x3F
@@ -806,14 +801,6 @@
  * R62 (0x3E) - PLL3
  */
 #define WM8991_PLLK2_MASK                       0x00FF  /* PLLK2 - [7:0] */
-
-/*
- * R63 (0x3F) - Internal Driver Bits
- */
-#define WM8991_INMIXL_PWR_BIT			0
-#define WM8991_AINLMUX_PWR_BIT			1
-#define WM8991_INMIXR_PWR_BIT			2
-#define WM8991_AINRMUX_PWR_BIT			3
 
 #define WM8991_MCLK_DIV 0
 #define WM8991_DACCLK_DIV 1

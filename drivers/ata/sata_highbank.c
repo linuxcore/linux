@@ -1,25 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Calxeda Highbank AHCI SATA platform driver
  * Copyright 2012 Calxeda, Inc.
  *
  * based on the AHCI SATA platform driver by Jeff Garzik and Anton Vorontsov
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <linux/kernel.h>
 #include <linux/gfp.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/err.h>
 #include <linux/io.h>
@@ -29,12 +17,10 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/libata.h>
-#include <linux/ahci_platform.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/export.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>
 
 #include "ahci.h"
 
@@ -46,14 +32,19 @@
 #define CR_BUSY				0x0001
 #define CR_START			0x0001
 #define CR_WR_RDN			0x0002
+#define CPHY_TX_INPUT_STS		0x2001
 #define CPHY_RX_INPUT_STS		0x2002
-#define CPHY_SATA_OVERRIDE	 	0x4000
-#define CPHY_OVERRIDE			0x2005
+#define CPHY_SATA_TX_OVERRIDE		0x8000
+#define CPHY_SATA_RX_OVERRIDE	 	0x4000
+#define CPHY_TX_OVERRIDE		0x2004
+#define CPHY_RX_OVERRIDE		0x2005
 #define SPHY_LANE			0x100
 #define SPHY_HALF_RATE			0x0001
 #define CPHY_SATA_DPLL_MODE		0x0700
 #define CPHY_SATA_DPLL_SHIFT		8
 #define CPHY_SATA_DPLL_RESET		(1 << 11)
+#define CPHY_SATA_TX_ATTEN		0x1c00
+#define CPHY_SATA_TX_ATTEN_SHIFT	10
 #define CPHY_PHY_COUNT			6
 #define CPHY_LANE_COUNT			4
 #define CPHY_PORT_COUNT			(CPHY_PHY_COUNT * CPHY_LANE_COUNT)
@@ -66,6 +57,7 @@ struct phy_lane_info {
 	void __iomem *phy_base;
 	u8 lane_mapping;
 	u8 phy_devs;
+	u8 tx_atten;
 };
 static struct phy_lane_info port_data[CPHY_PORT_COUNT];
 
@@ -76,21 +68,23 @@ static DEFINE_SPINLOCK(sgpio_lock);
 #define SGPIO_PINS			3
 #define SGPIO_PORTS			8
 
-/* can be cast as an ahci_host_priv for compatibility with most functions */
 struct ecx_plat_data {
 	u32		n_ports;
-	unsigned	sgpio_gpio[SGPIO_PINS];
+	/* number of extra clocks that the SGPIO PIC controller expects */
+	u32		pre_clocks;
+	u32		post_clocks;
+	struct gpio_desc *sgpio_gpiod[SGPIO_PINS];
 	u32		sgpio_pattern;
 	u32		port_to_sgpio[SGPIO_PORTS];
 };
 
 #define SGPIO_SIGNALS			3
 #define ECX_ACTIVITY_BITS		0x300000
-#define ECX_ACTIVITY_SHIFT		2
+#define ECX_ACTIVITY_SHIFT		0
 #define ECX_LOCATE_BITS			0x80000
 #define ECX_LOCATE_SHIFT		1
 #define ECX_FAULT_BITS			0x400000
-#define ECX_FAULT_SHIFT			0
+#define ECX_FAULT_SHIFT			2
 static inline int sgpio_bit_shift(struct ecx_plat_data *pdata, u32 port,
 				u32 shift)
 {
@@ -125,9 +119,9 @@ static void ecx_parse_sgpio(struct ecx_plat_data *pdata, u32 port, u32 state)
  */
 static void ecx_led_cycle_clock(struct ecx_plat_data *pdata)
 {
-	gpio_set_value(pdata->sgpio_gpio[SCLOCK], 1);
+	gpiod_set_value(pdata->sgpio_gpiod[SCLOCK], 1);
 	udelay(50);
-	gpio_set_value(pdata->sgpio_gpio[SCLOCK], 0);
+	gpiod_set_value(pdata->sgpio_gpiod[SCLOCK], 0);
 	udelay(50);
 }
 
@@ -135,7 +129,7 @@ static ssize_t ecx_transmit_led_message(struct ata_port *ap, u32 state,
 					ssize_t size)
 {
 	struct ahci_host_priv *hpriv =  ap->host->private_data;
-	struct ecx_plat_data *pdata = (struct ecx_plat_data *) hpriv->plat_data;
+	struct ecx_plat_data *pdata = hpriv->plat_data;
 	struct ahci_port_priv *pp = ap->private_data;
 	unsigned long flags;
 	int pmp, i;
@@ -155,18 +149,23 @@ static ssize_t ecx_transmit_led_message(struct ata_port *ap, u32 state,
 	spin_lock_irqsave(&sgpio_lock, flags);
 	ecx_parse_sgpio(pdata, ap->port_no, state);
 	sgpio_out = pdata->sgpio_pattern;
-	gpio_set_value(pdata->sgpio_gpio[SLOAD], 1);
+	for (i = 0; i < pdata->pre_clocks; i++)
+		ecx_led_cycle_clock(pdata);
+
+	gpiod_set_value(pdata->sgpio_gpiod[SLOAD], 1);
 	ecx_led_cycle_clock(pdata);
-	gpio_set_value(pdata->sgpio_gpio[SLOAD], 0);
+	gpiod_set_value(pdata->sgpio_gpiod[SLOAD], 0);
 	/*
 	 * bit-bang out the SGPIO pattern, by consuming a bit and then
 	 * clocking it out.
 	 */
 	for (i = 0; i < (SGPIO_SIGNALS * pdata->n_ports); i++) {
-		gpio_set_value(pdata->sgpio_gpio[SDATA], sgpio_out & 1);
+		gpiod_set_value(pdata->sgpio_gpiod[SDATA], sgpio_out & 1);
 		sgpio_out >>= 1;
 		ecx_led_cycle_clock(pdata);
 	}
+	for (i = 0; i < pdata->post_clocks; i++)
+		ecx_led_cycle_clock(pdata);
 
 	/* save off new led state for port/slot */
 	emp->led_state = state;
@@ -182,25 +181,28 @@ static void highbank_set_em_messages(struct device *dev,
 	struct device_node *np = dev->of_node;
 	struct ecx_plat_data *pdata = hpriv->plat_data;
 	int i;
-	int err;
 
 	for (i = 0; i < SGPIO_PINS; i++) {
-		err = of_get_named_gpio(np, "calxeda,sgpio-gpio", i);
-		if (IS_ERR_VALUE(err))
-			return;
+		struct gpio_desc *gpiod;
 
-		pdata->sgpio_gpio[i] = err;
-		err = gpio_request(pdata->sgpio_gpio[i], "CX SGPIO");
-		if (err) {
-			pr_err("sata_highbank gpio_request %d failed: %d\n",
-					i, err);
-			return;
+		gpiod = devm_gpiod_get_index(dev, "calxeda,sgpio", i,
+					     GPIOD_OUT_HIGH);
+		if (IS_ERR(gpiod)) {
+			dev_err(dev, "failed to get GPIO %d\n", i);
+			continue;
 		}
-		gpio_direction_output(pdata->sgpio_gpio[i], 1);
+		gpiod_set_consumer_name(gpiod, "CX SGPIO");
+
+		pdata->sgpio_gpiod[i] = gpiod;
 	}
 	of_property_read_u32_array(np, "calxeda,led-order",
 						pdata->port_to_sgpio,
 						pdata->n_ports);
+	if (of_property_read_u32(np, "calxeda,pre-clocks", &pdata->pre_clocks))
+		pdata->pre_clocks = 0;
+	if (of_property_read_u32(np, "calxeda,post-clocks",
+				&pdata->post_clocks))
+		pdata->post_clocks = 0;
 
 	/* store em_loc */
 	hpriv->em_loc = 0;
@@ -259,8 +261,27 @@ static void highbank_cphy_disable_overrides(u8 sata_port)
 	if (unlikely(port_data[sata_port].phy_base == NULL))
 		return;
 	tmp = combo_phy_read(sata_port, CPHY_RX_INPUT_STS + lane * SPHY_LANE);
-	tmp &= ~CPHY_SATA_OVERRIDE;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	tmp &= ~CPHY_SATA_RX_OVERRIDE;
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
+}
+
+static void cphy_override_tx_attenuation(u8 sata_port, u32 val)
+{
+	u8 lane = port_data[sata_port].lane_mapping;
+	u32 tmp;
+
+	if (val & 0x8)
+		return;
+
+	tmp = combo_phy_read(sata_port, CPHY_TX_INPUT_STS + lane * SPHY_LANE);
+	tmp &= ~CPHY_SATA_TX_OVERRIDE;
+	combo_phy_write(sata_port, CPHY_TX_OVERRIDE + lane * SPHY_LANE, tmp);
+
+	tmp |= CPHY_SATA_TX_OVERRIDE;
+	combo_phy_write(sata_port, CPHY_TX_OVERRIDE + lane * SPHY_LANE, tmp);
+
+	tmp |= (val << CPHY_SATA_TX_ATTEN_SHIFT) & CPHY_SATA_TX_ATTEN;
+	combo_phy_write(sata_port, CPHY_TX_OVERRIDE + lane * SPHY_LANE, tmp);
 }
 
 static void cphy_override_rx_mode(u8 sata_port, u32 val)
@@ -268,21 +289,21 @@ static void cphy_override_rx_mode(u8 sata_port, u32 val)
 	u8 lane = port_data[sata_port].lane_mapping;
 	u32 tmp;
 	tmp = combo_phy_read(sata_port, CPHY_RX_INPUT_STS + lane * SPHY_LANE);
-	tmp &= ~CPHY_SATA_OVERRIDE;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	tmp &= ~CPHY_SATA_RX_OVERRIDE;
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
 
-	tmp |= CPHY_SATA_OVERRIDE;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	tmp |= CPHY_SATA_RX_OVERRIDE;
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
 
 	tmp &= ~CPHY_SATA_DPLL_MODE;
 	tmp |= val << CPHY_SATA_DPLL_SHIFT;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
 
 	tmp |= CPHY_SATA_DPLL_RESET;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
 
 	tmp &= ~CPHY_SATA_DPLL_RESET;
-	combo_phy_write(sata_port, CPHY_OVERRIDE + lane * SPHY_LANE, tmp);
+	combo_phy_write(sata_port, CPHY_RX_OVERRIDE + lane * SPHY_LANE, tmp);
 
 	msleep(15);
 }
@@ -299,16 +320,18 @@ static void highbank_cphy_override_lane(u8 sata_port)
 						lane * SPHY_LANE);
 	} while ((tmp & SPHY_HALF_RATE) && (k++ < 1000));
 	cphy_override_rx_mode(sata_port, 3);
+	cphy_override_tx_attenuation(sata_port, port_data[sata_port].tx_atten);
 }
 
 static int highbank_initialize_phys(struct device *dev, void __iomem *addr)
 {
 	struct device_node *sata_node = dev->of_node;
-	int phy_count = 0, phy, port = 0;
-	void __iomem *cphy_base[CPHY_PHY_COUNT];
-	struct device_node *phy_nodes[CPHY_PHY_COUNT];
+	int phy_count = 0, phy, port = 0, i;
+	void __iomem *cphy_base[CPHY_PHY_COUNT] = {};
+	struct device_node *phy_nodes[CPHY_PHY_COUNT] = {};
+	u32 tx_atten[CPHY_PORT_COUNT] = {};
+
 	memset(port_data, 0, sizeof(struct phy_lane_info) * CPHY_PORT_COUNT);
-	memset(phy_nodes, 0, sizeof(struct device_node*) * CPHY_PHY_COUNT);
 
 	do {
 		u32 tmp;
@@ -336,6 +359,10 @@ static int highbank_initialize_phys(struct device *dev, void __iomem *addr)
 		of_node_put(phy_data.np);
 		port += 1;
 	} while (port < CPHY_PORT_COUNT);
+	of_property_read_u32_array(sata_node, "calxeda,tx-atten",
+				tx_atten, port);
+	for (i = 0; i < port; i++)
+		port_data[i].tx_atten = (u8) tx_atten[i];
 	return 0;
 }
 
@@ -361,6 +388,7 @@ static int ahci_highbank_hardreset(struct ata_link *link, unsigned int *class,
 	static const unsigned long timing[] = { 5, 100, 500};
 	struct ata_port *ap = link->ap;
 	struct ahci_port_priv *pp = ap->private_data;
+	struct ahci_host_priv *hpriv = ap->host->private_data;
 	u8 *d2h_fis = pp->rx_fis + RX_FIS_D2H_REG;
 	struct ata_taskfile tf;
 	bool online;
@@ -368,7 +396,7 @@ static int ahci_highbank_hardreset(struct ata_link *link, unsigned int *class,
 	int rc;
 	int retry = 100;
 
-	ahci_stop_engine(ap);
+	hpriv->stop_engine(ap);
 
 	/* clear D2H reception area to properly wait for D2H FIS */
 	ata_tf_init(link->device, &tf);
@@ -389,7 +417,7 @@ static int ahci_highbank_hardreset(struct ata_link *link, unsigned int *class,
 			break;
 	} while (!online && retry--);
 
-	ahci_start_engine(ap);
+	hpriv->start_engine(ap);
 
 	if (online)
 		*class = ahci_dev_classify(ap);
@@ -441,10 +469,10 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0) {
-		dev_err(dev, "no irq\n");
+	if (irq < 0)
+		return irq;
+	if (!irq)
 		return -EINVAL;
-	}
 
 	hpriv = devm_kzalloc(dev, sizeof(*hpriv), GFP_KERNEL);
 	if (!hpriv) {
@@ -457,6 +485,7 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+	hpriv->irq = irq;
 	hpriv->flags |= (unsigned long)pi.private_data;
 
 	hpriv->mmio = devm_ioremap(dev, mem->start, resource_size(mem));
@@ -470,7 +499,7 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 		return rc;
 
 
-	ahci_save_initial_config(dev, hpriv, 0, 0);
+	ahci_save_initial_config(dev, hpriv);
 
 	/* prepare host */
 	if (hpriv->cap & HOST_CAP_NCQ)
@@ -478,6 +507,9 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 
 	if (hpriv->cap & HOST_CAP_PMP)
 		pi.flags |= ATA_FLAG_PMP;
+
+	if (hpriv->cap & HOST_CAP_64)
+		dma_set_coherent_mask(dev, DMA_BIT_MASK(64));
 
 	/* CAP.NP sometimes indicate the index of the last enabled
 	 * port, at other times, that of the last possible port, so
@@ -523,8 +555,7 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 	ahci_init_controller(host);
 	ahci_print_info(host, "platform");
 
-	rc = ata_host_activate(host, irq, ahci_interrupt, 0,
-					&ahci_highbank_platform_sht);
+	rc = ahci_host_activate(host, &ahci_highbank_platform_sht);
 	if (rc)
 		goto err0;
 
@@ -540,7 +571,6 @@ static int ahci_highbank_suspend(struct device *dev)
 	struct ahci_host_priv *hpriv = host->private_data;
 	void __iomem *mmio = hpriv->mmio;
 	u32 ctl;
-	int rc;
 
 	if (hpriv->flags & AHCI_HFLAG_NO_SUSPEND) {
 		dev_err(dev, "firmware update required for suspend/resume\n");
@@ -557,11 +587,7 @@ static int ahci_highbank_suspend(struct device *dev)
 	writel(ctl, mmio + HOST_CTL);
 	readl(mmio + HOST_CTL); /* flush */
 
-	rc = ata_host_suspend(host, PMSG_SUSPEND);
-	if (rc)
-		return rc;
-
-	return 0;
+	return ata_host_suspend(host, PMSG_SUSPEND);
 }
 
 static int ahci_highbank_resume(struct device *dev)
@@ -590,7 +616,6 @@ static struct platform_driver ahci_highbank_driver = {
 	.remove = ata_platform_remove_one,
         .driver = {
                 .name = "highbank-ahci",
-                .owner = THIS_MODULE,
                 .of_match_table = ahci_of_match,
                 .pm = &ahci_highbank_pm_ops,
         },

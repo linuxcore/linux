@@ -121,13 +121,8 @@ static const struct i2c_device_id pm80x_id_table[] = {
 };
 MODULE_DEVICE_TABLE(i2c, pm80x_id_table);
 
-static struct resource rtc_resources[] = {
-	{
-	 .name = "88pm80x-rtc",
-	 .start = PM800_IRQ_RTC,
-	 .end = PM800_IRQ_RTC,
-	 .flags = IORESOURCE_IRQ,
-	 },
+static const struct resource rtc_resources[] = {
+	DEFINE_RES_IRQ_NAMED(PM800_IRQ_RTC, "88pm80x-rtc"),
 };
 
 static struct mfd_cell rtc_devs[] = {
@@ -140,15 +135,10 @@ static struct mfd_cell rtc_devs[] = {
 };
 
 static struct resource onkey_resources[] = {
-	{
-	 .name = "88pm80x-onkey",
-	 .start = PM800_IRQ_ONKEY,
-	 .end = PM800_IRQ_ONKEY,
-	 .flags = IORESOURCE_IRQ,
-	 },
+	DEFINE_RES_IRQ_NAMED(PM800_IRQ_ONKEY, "88pm80x-onkey"),
 };
 
-static struct mfd_cell onkey_devs[] = {
+static const struct mfd_cell onkey_devs[] = {
 	{
 	 .name = "88pm80x-onkey",
 	 .num_resources = 1,
@@ -157,7 +147,7 @@ static struct mfd_cell onkey_devs[] = {
 	 },
 };
 
-static struct mfd_cell regulator_devs[] = {
+static const struct mfd_cell regulator_devs[] = {
 	{
 	 .name = "88pm80x-regulator",
 	 .id = -1,
@@ -333,9 +323,11 @@ static int device_rtc_init(struct pm80x_chip *chip,
 {
 	int ret;
 
-	rtc_devs[0].platform_data = pdata->rtc;
-	rtc_devs[0].pdata_size =
-			pdata->rtc ? sizeof(struct pm80x_rtc_pdata) : 0;
+	if (pdata) {
+		rtc_devs[0].platform_data = pdata->rtc;
+		rtc_devs[0].pdata_size =
+				pdata->rtc ? sizeof(struct pm80x_rtc_pdata) : 0;
+	}
 	ret = mfd_add_devices(chip->dev, 0, &rtc_devs[0],
 			      ARRAY_SIZE(rtc_devs), NULL, 0, NULL);
 	if (ret) {
@@ -423,10 +415,10 @@ static int pm800_pages_init(struct pm80x_chip *chip)
 		return -ENODEV;
 
 	/* PM800 block power page */
-	subchip->power_page = i2c_new_dummy(client->adapter,
+	subchip->power_page = i2c_new_dummy_device(client->adapter,
 					    subchip->power_page_addr);
-	if (subchip->power_page == NULL) {
-		ret = -ENODEV;
+	if (IS_ERR(subchip->power_page)) {
+		ret = PTR_ERR(subchip->power_page);
 		goto out;
 	}
 
@@ -442,10 +434,10 @@ static int pm800_pages_init(struct pm80x_chip *chip)
 	i2c_set_clientdata(subchip->power_page, chip);
 
 	/* PM800 block GPADC */
-	subchip->gpadc_page = i2c_new_dummy(client->adapter,
+	subchip->gpadc_page = i2c_new_dummy_device(client->adapter,
 					    subchip->gpadc_page_addr);
-	if (subchip->gpadc_page == NULL) {
-		ret = -ENODEV;
+	if (IS_ERR(subchip->gpadc_page)) {
+		ret = PTR_ERR(subchip->gpadc_page);
 		goto out;
 	}
 
@@ -541,7 +533,7 @@ static int pm800_probe(struct i2c_client *client,
 {
 	int ret = 0;
 	struct pm80x_chip *chip;
-	struct pm80x_platform_data *pdata = client->dev.platform_data;
+	struct pm80x_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct pm80x_subchip *subchip;
 
 	ret = pm80x_init(client);
@@ -569,7 +561,7 @@ static int pm800_probe(struct i2c_client *client,
 	ret = pm800_pages_init(chip);
 	if (ret) {
 		dev_err(&client->dev, "pm800_pages_init failed!\n");
-		goto err_page_init;
+		goto err_device_init;
 	}
 
 	ret = device_800_init(chip, pdata);
@@ -578,14 +570,13 @@ static int pm800_probe(struct i2c_client *client,
 		goto err_device_init;
 	}
 
-	if (pdata->plat_config)
+	if (pdata && pdata->plat_config)
 		pdata->plat_config(chip, pdata);
 
 	return 0;
 
 err_device_init:
 	pm800_pages_exit(chip);
-err_page_init:
 err_subchip_alloc:
 	pm80x_deinit();
 out_init:
@@ -608,7 +599,6 @@ static int pm800_remove(struct i2c_client *client)
 static struct i2c_driver pm800_driver = {
 	.driver = {
 		.name = "88PM800",
-		.owner = THIS_MODULE,
 		.pm = &pm80x_pm_ops,
 		},
 	.probe = pm800_probe,

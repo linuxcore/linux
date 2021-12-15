@@ -1,18 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Performance counter support for POWER7 processors.
  *
  * Copyright 2009 Paul Mackerras, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/perf_event.h>
 #include <linux/string.h>
 #include <asm/reg.h>
 #include <asm/cputable.h>
+
+#include "internal.h"
 
 /*
  * Bits in event code for POWER7
@@ -53,37 +51,13 @@
 /*
  * Power7 event codes.
  */
-#define	PME_PM_CYC			0x1e
-#define	PME_PM_GCT_NOSLOT_CYC		0x100f8
-#define	PME_PM_CMPLU_STALL		0x4000a
-#define	PME_PM_INST_CMPL		0x2
-#define	PME_PM_LD_REF_L1		0xc880
-#define	PME_PM_LD_MISS_L1		0x400f0
-#define	PME_PM_BRU_FIN			0x10068
-#define	PME_PM_BR_MPRED			0x400f6
+#define EVENT(_name, _code) \
+	_name = _code,
 
-#define PME_PM_CMPLU_STALL_FXU			0x20014
-#define PME_PM_CMPLU_STALL_DIV			0x40014
-#define PME_PM_CMPLU_STALL_SCALAR		0x40012
-#define PME_PM_CMPLU_STALL_SCALAR_LONG		0x20018
-#define PME_PM_CMPLU_STALL_VECTOR		0x2001c
-#define PME_PM_CMPLU_STALL_VECTOR_LONG		0x4004a
-#define PME_PM_CMPLU_STALL_LSU			0x20012
-#define PME_PM_CMPLU_STALL_REJECT		0x40016
-#define PME_PM_CMPLU_STALL_ERAT_MISS		0x40018
-#define PME_PM_CMPLU_STALL_DCACHE_MISS		0x20016
-#define PME_PM_CMPLU_STALL_STORE		0x2004a
-#define PME_PM_CMPLU_STALL_THRD			0x1001c
-#define PME_PM_CMPLU_STALL_IFU			0x4004c
-#define PME_PM_CMPLU_STALL_BRU			0x4004e
-#define PME_PM_GCT_NOSLOT_IC_MISS		0x2001a
-#define PME_PM_GCT_NOSLOT_BR_MPRED		0x4001a
-#define PME_PM_GCT_NOSLOT_BR_MPRED_IC_MISS	0x4001c
-#define PME_PM_GRP_CMPL				0x30004
-#define PME_PM_1PLUS_PPC_CMPL			0x100f2
-#define PME_PM_CMPLU_STALL_DFU			0x2003c
-#define PME_PM_RUN_CYC				0x200f4
-#define PME_PM_RUN_INST_CMPL			0x400fa
+enum {
+#include "power7-events-list.h"
+};
+#undef EVENT
 
 /*
  * Layout of constraint bits:
@@ -107,7 +81,7 @@
  */
 
 static int power7_get_constraint(u64 event, unsigned long *maskp,
-				 unsigned long *valp)
+				 unsigned long *valp, u64 event_config1 __maybe_unused)
 {
 	int pmc, sh, unit;
 	unsigned long mask = 0, value = 0;
@@ -262,6 +236,7 @@ static int power7_marked_instr_event(u64 event)
 	case 6:
 		if (psel == 0x64)
 			return pmc >= 3;
+		break;
 	case 8:
 		return unit == 0xd;
 	}
@@ -269,7 +244,9 @@ static int power7_marked_instr_event(u64 event)
 }
 
 static int power7_compute_mmcr(u64 event[], int n_ev,
-			       unsigned int hwc[], unsigned long mmcr[])
+			       unsigned int hwc[], struct mmcr_regs *mmcr,
+			       struct perf_event *pevents[],
+			       u32 flags __maybe_unused)
 {
 	unsigned long mmcr1 = 0;
 	unsigned long mmcra = MMCRA_SDAR_DCACHE_MISS | MMCRA_SDAR_ERAT_MISS;
@@ -325,31 +302,31 @@ static int power7_compute_mmcr(u64 event[], int n_ev,
 	}
 
 	/* Return MMCRx values */
-	mmcr[0] = 0;
+	mmcr->mmcr0 = 0;
 	if (pmc_inuse & 1)
-		mmcr[0] = MMCR0_PMC1CE;
+		mmcr->mmcr0 = MMCR0_PMC1CE;
 	if (pmc_inuse & 0x3e)
-		mmcr[0] |= MMCR0_PMCjCE;
-	mmcr[1] = mmcr1;
-	mmcr[2] = mmcra;
+		mmcr->mmcr0 |= MMCR0_PMCjCE;
+	mmcr->mmcr1 = mmcr1;
+	mmcr->mmcra = mmcra;
 	return 0;
 }
 
-static void power7_disable_pmc(unsigned int pmc, unsigned long mmcr[])
+static void power7_disable_pmc(unsigned int pmc, struct mmcr_regs *mmcr)
 {
 	if (pmc <= 3)
-		mmcr[1] &= ~(0xffUL << MMCR1_PMCSEL_SH(pmc));
+		mmcr->mmcr1 &= ~(0xffUL << MMCR1_PMCSEL_SH(pmc));
 }
 
 static int power7_generic_events[] = {
-	[PERF_COUNT_HW_CPU_CYCLES] =			PME_PM_CYC,
-	[PERF_COUNT_HW_STALLED_CYCLES_FRONTEND] =	PME_PM_GCT_NOSLOT_CYC,
-	[PERF_COUNT_HW_STALLED_CYCLES_BACKEND] =	PME_PM_CMPLU_STALL,
-	[PERF_COUNT_HW_INSTRUCTIONS] =			PME_PM_INST_CMPL,
-	[PERF_COUNT_HW_CACHE_REFERENCES] =		PME_PM_LD_REF_L1,
-	[PERF_COUNT_HW_CACHE_MISSES] =			PME_PM_LD_MISS_L1,
-	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS] =		PME_PM_BRU_FIN,
-	[PERF_COUNT_HW_BRANCH_MISSES] =			PME_PM_BR_MPRED,
+	[PERF_COUNT_HW_CPU_CYCLES] =			PM_CYC,
+	[PERF_COUNT_HW_STALLED_CYCLES_FRONTEND] =	PM_GCT_NOSLOT_CYC,
+	[PERF_COUNT_HW_STALLED_CYCLES_BACKEND] =	PM_CMPLU_STALL,
+	[PERF_COUNT_HW_INSTRUCTIONS] =			PM_INST_CMPL,
+	[PERF_COUNT_HW_CACHE_REFERENCES] =		PM_LD_REF_L1,
+	[PERF_COUNT_HW_CACHE_MISSES] =			PM_LD_MISS_L1,
+	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS] =		PM_BRU_FIN,
+	[PERF_COUNT_HW_BRANCH_MISSES] =			PM_BR_MPRED,
 };
 
 #define C(x)	PERF_COUNT_HW_CACHE_##x
@@ -359,7 +336,7 @@ static int power7_generic_events[] = {
  * 0 means not supported, -1 means nonsensical, other values
  * are event codes.
  */
-static int power7_cache_events[C(MAX)][C(OP_MAX)][C(RESULT_MAX)] = {
+static u64 power7_cache_events[C(MAX)][C(OP_MAX)][C(RESULT_MAX)] = {
 	[C(L1D)] = {		/* 	RESULT_ACCESS	RESULT_MISS */
 		[C(OP_READ)] = {	0xc880,		0x400f0	},
 		[C(OP_WRITE)] = {	0,		0x300f0	},
@@ -398,95 +375,35 @@ static int power7_cache_events[C(MAX)][C(OP_MAX)][C(RESULT_MAX)] = {
 };
 
 
-GENERIC_EVENT_ATTR(cpu-cycles,			CYC);
-GENERIC_EVENT_ATTR(stalled-cycles-frontend,	GCT_NOSLOT_CYC);
-GENERIC_EVENT_ATTR(stalled-cycles-backend,	CMPLU_STALL);
-GENERIC_EVENT_ATTR(instructions,		INST_CMPL);
-GENERIC_EVENT_ATTR(cache-references,		LD_REF_L1);
-GENERIC_EVENT_ATTR(cache-misses,		LD_MISS_L1);
-GENERIC_EVENT_ATTR(branch-instructions,		BRU_FIN);
-GENERIC_EVENT_ATTR(branch-misses,		BR_MPRED);
+GENERIC_EVENT_ATTR(cpu-cycles,			PM_CYC);
+GENERIC_EVENT_ATTR(stalled-cycles-frontend,	PM_GCT_NOSLOT_CYC);
+GENERIC_EVENT_ATTR(stalled-cycles-backend,	PM_CMPLU_STALL);
+GENERIC_EVENT_ATTR(instructions,		PM_INST_CMPL);
+GENERIC_EVENT_ATTR(cache-references,		PM_LD_REF_L1);
+GENERIC_EVENT_ATTR(cache-misses,		PM_LD_MISS_L1);
+GENERIC_EVENT_ATTR(branch-instructions,		PM_BRU_FIN);
+GENERIC_EVENT_ATTR(branch-misses,		PM_BR_MPRED);
 
-POWER_EVENT_ATTR(CYC,				CYC);
-POWER_EVENT_ATTR(GCT_NOSLOT_CYC,		GCT_NOSLOT_CYC);
-POWER_EVENT_ATTR(CMPLU_STALL,			CMPLU_STALL);
-POWER_EVENT_ATTR(INST_CMPL,			INST_CMPL);
-POWER_EVENT_ATTR(LD_REF_L1,			LD_REF_L1);
-POWER_EVENT_ATTR(LD_MISS_L1,			LD_MISS_L1);
-POWER_EVENT_ATTR(BRU_FIN,			BRU_FIN)
-POWER_EVENT_ATTR(BR_MPRED,			BR_MPRED);
+#define EVENT(_name, _code)     POWER_EVENT_ATTR(_name, _name);
+#include "power7-events-list.h"
+#undef EVENT
 
-POWER_EVENT_ATTR(CMPLU_STALL_FXU,		CMPLU_STALL_FXU);
-POWER_EVENT_ATTR(CMPLU_STALL_DIV,		CMPLU_STALL_DIV);
-POWER_EVENT_ATTR(CMPLU_STALL_SCALAR,		CMPLU_STALL_SCALAR);
-POWER_EVENT_ATTR(CMPLU_STALL_SCALAR_LONG,	CMPLU_STALL_SCALAR_LONG);
-POWER_EVENT_ATTR(CMPLU_STALL_VECTOR,		CMPLU_STALL_VECTOR);
-POWER_EVENT_ATTR(CMPLU_STALL_VECTOR_LONG,	CMPLU_STALL_VECTOR_LONG);
-POWER_EVENT_ATTR(CMPLU_STALL_LSU,		CMPLU_STALL_LSU);
-POWER_EVENT_ATTR(CMPLU_STALL_REJECT,		CMPLU_STALL_REJECT);
-
-POWER_EVENT_ATTR(CMPLU_STALL_ERAT_MISS,		CMPLU_STALL_ERAT_MISS);
-POWER_EVENT_ATTR(CMPLU_STALL_DCACHE_MISS,	CMPLU_STALL_DCACHE_MISS);
-POWER_EVENT_ATTR(CMPLU_STALL_STORE,		CMPLU_STALL_STORE);
-POWER_EVENT_ATTR(CMPLU_STALL_THRD,		CMPLU_STALL_THRD);
-POWER_EVENT_ATTR(CMPLU_STALL_IFU,		CMPLU_STALL_IFU);
-POWER_EVENT_ATTR(CMPLU_STALL_BRU,		CMPLU_STALL_BRU);
-POWER_EVENT_ATTR(GCT_NOSLOT_IC_MISS,		GCT_NOSLOT_IC_MISS);
-
-POWER_EVENT_ATTR(GCT_NOSLOT_BR_MPRED,		GCT_NOSLOT_BR_MPRED);
-POWER_EVENT_ATTR(GCT_NOSLOT_BR_MPRED_IC_MISS,	GCT_NOSLOT_BR_MPRED_IC_MISS);
-POWER_EVENT_ATTR(GRP_CMPL,			GRP_CMPL);
-POWER_EVENT_ATTR(1PLUS_PPC_CMPL,		1PLUS_PPC_CMPL);
-POWER_EVENT_ATTR(CMPLU_STALL_DFU,		CMPLU_STALL_DFU);
-POWER_EVENT_ATTR(RUN_CYC,			RUN_CYC);
-POWER_EVENT_ATTR(RUN_INST_CMPL,			RUN_INST_CMPL);
+#define EVENT(_name, _code)     POWER_EVENT_PTR(_name),
 
 static struct attribute *power7_events_attr[] = {
-	GENERIC_EVENT_PTR(CYC),
-	GENERIC_EVENT_PTR(GCT_NOSLOT_CYC),
-	GENERIC_EVENT_PTR(CMPLU_STALL),
-	GENERIC_EVENT_PTR(INST_CMPL),
-	GENERIC_EVENT_PTR(LD_REF_L1),
-	GENERIC_EVENT_PTR(LD_MISS_L1),
-	GENERIC_EVENT_PTR(BRU_FIN),
-	GENERIC_EVENT_PTR(BR_MPRED),
+	GENERIC_EVENT_PTR(PM_CYC),
+	GENERIC_EVENT_PTR(PM_GCT_NOSLOT_CYC),
+	GENERIC_EVENT_PTR(PM_CMPLU_STALL),
+	GENERIC_EVENT_PTR(PM_INST_CMPL),
+	GENERIC_EVENT_PTR(PM_LD_REF_L1),
+	GENERIC_EVENT_PTR(PM_LD_MISS_L1),
+	GENERIC_EVENT_PTR(PM_BRU_FIN),
+	GENERIC_EVENT_PTR(PM_BR_MPRED),
 
-	POWER_EVENT_PTR(CYC),
-	POWER_EVENT_PTR(GCT_NOSLOT_CYC),
-	POWER_EVENT_PTR(CMPLU_STALL),
-	POWER_EVENT_PTR(INST_CMPL),
-	POWER_EVENT_PTR(LD_REF_L1),
-	POWER_EVENT_PTR(LD_MISS_L1),
-	POWER_EVENT_PTR(BRU_FIN),
-	POWER_EVENT_PTR(BR_MPRED),
-
-	POWER_EVENT_PTR(CMPLU_STALL_FXU),
-	POWER_EVENT_PTR(CMPLU_STALL_DIV),
-	POWER_EVENT_PTR(CMPLU_STALL_SCALAR),
-	POWER_EVENT_PTR(CMPLU_STALL_SCALAR_LONG),
-	POWER_EVENT_PTR(CMPLU_STALL_VECTOR),
-	POWER_EVENT_PTR(CMPLU_STALL_VECTOR_LONG),
-	POWER_EVENT_PTR(CMPLU_STALL_LSU),
-	POWER_EVENT_PTR(CMPLU_STALL_REJECT),
-
-	POWER_EVENT_PTR(CMPLU_STALL_ERAT_MISS),
-	POWER_EVENT_PTR(CMPLU_STALL_DCACHE_MISS),
-	POWER_EVENT_PTR(CMPLU_STALL_STORE),
-	POWER_EVENT_PTR(CMPLU_STALL_THRD),
-	POWER_EVENT_PTR(CMPLU_STALL_IFU),
-	POWER_EVENT_PTR(CMPLU_STALL_BRU),
-	POWER_EVENT_PTR(GCT_NOSLOT_IC_MISS),
-	POWER_EVENT_PTR(GCT_NOSLOT_BR_MPRED),
-
-	POWER_EVENT_PTR(GCT_NOSLOT_BR_MPRED_IC_MISS),
-	POWER_EVENT_PTR(GRP_CMPL),
-	POWER_EVENT_PTR(1PLUS_PPC_CMPL),
-	POWER_EVENT_PTR(CMPLU_STALL_DFU),
-	POWER_EVENT_PTR(RUN_CYC),
-	POWER_EVENT_PTR(RUN_INST_CMPL),
+	#include "power7-events-list.h"
+	#undef EVENT
 	NULL
 };
-
 
 static struct attribute_group power7_pmu_events_group = {
 	.name = "events",
@@ -500,7 +417,7 @@ static struct attribute *power7_pmu_format_attr[] = {
 	NULL,
 };
 
-struct attribute_group power7_pmu_format_group = {
+static struct attribute_group power7_pmu_format_group = {
 	.name = "format",
 	.attrs = power7_pmu_format_attr,
 };
@@ -528,7 +445,7 @@ static struct power_pmu power7_pmu = {
 	.cache_events		= &power7_cache_events,
 };
 
-static int __init init_power7_pmu(void)
+int init_power7_pmu(void)
 {
 	if (!cur_cpu_spec->oprofile_cpu_type ||
 	    strcmp(cur_cpu_spec->oprofile_cpu_type, "ppc64/power7"))
@@ -539,5 +456,3 @@ static int __init init_power7_pmu(void)
 
 	return register_power_pmu(&power7_pmu);
 }
-
-early_initcall(init_power7_pmu);

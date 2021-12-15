@@ -21,12 +21,15 @@
  *
  */
 
-#include "drmP.h"
-#include "radeon.h"
-#include "trinityd.h"
-#include "r600_dpm.h"
-#include "trinity_dpm.h"
+#include <linux/pci.h>
 #include <linux/seq_file.h>
+
+#include "r600_dpm.h"
+#include "radeon.h"
+#include "radeon_asic.h"
+#include "trinity_dpm.h"
+#include "trinityd.h"
+#include "vce.h"
 
 #define TRINITY_MAX_DEEPSLEEP_DIVIDER_ID 5
 #define TRINITY_MINIMUM_ENGINE_CLOCK 800
@@ -114,54 +117,10 @@ static const u32 trinity_mgcg_shls_default[] =
 	0x00009220, 0x00090008, 0xffffffff,
 	0x00009294, 0x00000000, 0xffffffff
 };
-
-static const u32 trinity_mgcg_shls_enable[] =
-{
-	/* Register, Value, Mask */
-	0x0000802c, 0xc0000000, 0xffffffff,
-	0x000008f8, 0x00000000, 0xffffffff,
-	0x000008fc, 0x00000000, 0x000133FF,
-	0x000008f8, 0x00000001, 0xffffffff,
-	0x000008fc, 0x00000000, 0xE00B03FC,
-	0x00009150, 0x96944200, 0xffffffff
-};
-
-static const u32 trinity_mgcg_shls_disable[] =
-{
-	/* Register, Value, Mask */
-	0x0000802c, 0xc0000000, 0xffffffff,
-	0x00009150, 0x00600000, 0xffffffff,
-	0x000008f8, 0x00000000, 0xffffffff,
-	0x000008fc, 0xffffffff, 0x000133FF,
-	0x000008f8, 0x00000001, 0xffffffff,
-	0x000008fc, 0xffffffff, 0xE00B03FC
-};
 #endif
 
 #ifndef TRINITY_SYSLS_SEQUENCE
 #define TRINITY_SYSLS_SEQUENCE  100
-
-static const u32 trinity_sysls_default[] =
-{
-	/* Register, Value, Mask */
-	0x000055e8, 0x00000000, 0xffffffff,
-	0x0000d0bc, 0x00000000, 0xffffffff,
-	0x0000d8bc, 0x00000000, 0xffffffff,
-	0x000015c0, 0x000c1401, 0xffffffff,
-	0x0000264c, 0x000c0400, 0xffffffff,
-	0x00002648, 0x000c0400, 0xffffffff,
-	0x00002650, 0x000c0400, 0xffffffff,
-	0x000020b8, 0x000c0400, 0xffffffff,
-	0x000020bc, 0x000c0400, 0xffffffff,
-	0x000020c0, 0x000c0c80, 0xffffffff,
-	0x0000f4a0, 0x000000c0, 0xffffffff,
-	0x0000f4a4, 0x00680fff, 0xffffffff,
-	0x00002f50, 0x00000404, 0xffffffff,
-	0x000004c8, 0x00000001, 0xffffffff,
-	0x0000641c, 0x00000000, 0xffffffff,
-	0x00000c7c, 0x00000000, 0xffffffff,
-	0x00006dfc, 0x00000000, 0xffffffff
-};
 
 static const u32 trinity_sysls_disable[] =
 {
@@ -342,14 +301,14 @@ static void trinity_apply_state_adjust_rules(struct radeon_device *rdev,
 					     struct radeon_ps *new_rps,
 					     struct radeon_ps *old_rps);
 
-struct trinity_ps *trinity_get_ps(struct radeon_ps *rps)
+static struct trinity_ps *trinity_get_ps(struct radeon_ps *rps)
 {
 	struct trinity_ps *ps = rps->ps_priv;
 
 	return ps;
 }
 
-struct trinity_power_info *trinity_get_pi(struct radeon_device *rdev)
+static struct trinity_power_info *trinity_get_pi(struct radeon_device *rdev)
 {
 	struct trinity_power_info *pi = rdev->pm.dpm.priv;
 
@@ -367,8 +326,8 @@ static void trinity_gfx_powergating_initialize(struct radeon_device *rdev)
 	int ret;
 	u32 hw_rev = (RREG32(HW_REV) & ATI_REV_ID_MASK) >> ATI_REV_ID_SHIFT;
 
-        ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
-                                             25000, false, &dividers);
+	ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
+					     25000, false, &dividers);
 	if (ret)
 		return;
 
@@ -585,8 +544,8 @@ static void trinity_set_divider_value(struct radeon_device *rdev,
 	u32 value;
 	u32 ix = index * TRINITY_SIZEOF_DPM_STATE_TABLE;
 
-        ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
-                                             sclk, false, &dividers);
+	ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
+					     sclk, false, &dividers);
 	if (ret)
 		return;
 
@@ -595,8 +554,8 @@ static void trinity_set_divider_value(struct radeon_device *rdev,
 	value |= CLK_DIVIDER(dividers.post_div);
 	WREG32_SMC(SMU_SCLK_DPM_STATE_0_CNTL_0 + ix, value);
 
-        ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
-                                             sclk/2, false, &dividers);
+	ret = radeon_atom_get_clock_dividers(rdev, COMPUTE_ENGINE_PLL_PARAM,
+					     sclk/2, false, &dividers);
 	if (ret)
 		return;
 
@@ -984,6 +943,21 @@ static void trinity_set_uvd_clock_after_set_eng_clock(struct radeon_device *rdev
 	trinity_setup_uvd_clocks(rdev, new_rps, old_rps);
 }
 
+static void trinity_set_vce_clock(struct radeon_device *rdev,
+				  struct radeon_ps *new_rps,
+				  struct radeon_ps *old_rps)
+{
+	if ((old_rps->evclk != new_rps->evclk) ||
+	    (old_rps->ecclk != new_rps->ecclk)) {
+		/* turn the clocks on when encoding, off otherwise */
+		if (new_rps->evclk || new_rps->ecclk)
+			vce_v1_0_enable_mgcg(rdev, false);
+		else
+			vce_v1_0_enable_mgcg(rdev, true);
+		radeon_set_vce_clocks(rdev, new_rps->evclk, new_rps->ecclk);
+	}
+}
+
 static void trinity_program_ttt(struct radeon_device *rdev)
 {
 	struct trinity_power_info *pi = trinity_get_pi(rdev);
@@ -1028,14 +1002,14 @@ static int trinity_set_thermal_temperature_range(struct radeon_device *rdev,
 	int low_temp = 0 * 1000;
 	int high_temp = 255 * 1000;
 
-        if (low_temp < min_temp)
+	if (low_temp < min_temp)
 		low_temp = min_temp;
-        if (high_temp > max_temp)
+	if (high_temp > max_temp)
 		high_temp = max_temp;
-        if (high_temp < low_temp) {
+	if (high_temp < low_temp) {
 		DRM_ERROR("invalid thermal range: %d - %d\n", low_temp, high_temp);
-                return -EINVAL;
-        }
+		return -EINVAL;
+	}
 
 	WREG32_P(CG_THERMAL_INT_CTRL, DIG_THERM_INTH(49 + (high_temp / 1000)), ~DIG_THERM_INTH_MASK);
 	WREG32_P(CG_THERMAL_INT_CTRL, DIG_THERM_INTL(49 + (low_temp / 1000)), ~DIG_THERM_INTL_MASK);
@@ -1068,10 +1042,20 @@ static void trinity_update_requested_ps(struct radeon_device *rdev,
 	pi->requested_rps.ps_priv = &pi->requested_ps;
 }
 
+void trinity_dpm_enable_bapm(struct radeon_device *rdev, bool enable)
+{
+	struct trinity_power_info *pi = trinity_get_pi(rdev);
+
+	if (pi->enable_bapm) {
+		trinity_acquire_mutex(rdev);
+		trinity_dpm_bapm_enable(rdev, enable);
+		trinity_release_mutex(rdev);
+	}
+}
+
 int trinity_dpm_enable(struct radeon_device *rdev)
 {
 	struct trinity_power_info *pi = trinity_get_pi(rdev);
-	int ret;
 
 	trinity_acquire_mutex(rdev);
 
@@ -1080,7 +1064,6 @@ int trinity_dpm_enable(struct radeon_device *rdev)
 		return -EINVAL;
 	}
 
-	trinity_enable_clock_power_gating(rdev);
 	trinity_program_bootup_state(rdev);
 	sumo_program_vc(rdev, 0x00C00033);
 	trinity_start_am(rdev);
@@ -1091,7 +1074,20 @@ int trinity_dpm_enable(struct radeon_device *rdev)
 	trinity_program_sclk_dpm(rdev);
 	trinity_start_dpm(rdev);
 	trinity_wait_for_dpm_enabled(rdev);
+	trinity_dpm_bapm_enable(rdev, false);
 	trinity_release_mutex(rdev);
+
+	trinity_update_current_ps(rdev, rdev->pm.dpm.boot_ps);
+
+	return 0;
+}
+
+int trinity_dpm_late_enable(struct radeon_device *rdev)
+{
+	int ret;
+
+	trinity_acquire_mutex(rdev);
+	trinity_enable_clock_power_gating(rdev);
 
 	if (rdev->irq.installed &&
 	    r600_is_internal_thermal_sensor(rdev->pm.int_thermal_type)) {
@@ -1103,8 +1099,7 @@ int trinity_dpm_enable(struct radeon_device *rdev)
 		rdev->irq.dpm_thermal = true;
 		radeon_irq_set(rdev);
 	}
-
-	trinity_update_current_ps(rdev, rdev->pm.dpm.boot_ps);
+	trinity_release_mutex(rdev);
 
 	return 0;
 }
@@ -1116,6 +1111,7 @@ void trinity_dpm_disable(struct radeon_device *rdev)
 		trinity_release_mutex(rdev);
 		return;
 	}
+	trinity_dpm_bapm_enable(rdev, false);
 	trinity_disable_clock_power_gating(rdev);
 	sumo_clear_vc(rdev);
 	trinity_wait_for_level_0(rdev);
@@ -1212,6 +1208,8 @@ int trinity_dpm_set_power_state(struct radeon_device *rdev)
 
 	trinity_acquire_mutex(rdev);
 	if (pi->enable_dpm) {
+		if (pi->enable_bapm)
+			trinity_dpm_bapm_enable(rdev, rdev->pm.dpm.ac_power);
 		trinity_set_uvd_clock_before_set_eng_clock(rdev, new_ps, old_ps);
 		trinity_enable_power_level_0(rdev);
 		trinity_force_level_0(rdev);
@@ -1221,7 +1219,7 @@ int trinity_dpm_set_power_state(struct radeon_device *rdev)
 		trinity_force_level_0(rdev);
 		trinity_unforce_levels(rdev);
 		trinity_set_uvd_clock_after_set_eng_clock(rdev, new_ps, old_ps);
-		rdev->pm.dpm.forced_level = RADEON_DPM_FORCED_LEVEL_AUTO;
+		trinity_set_vce_clock(rdev, new_ps, old_ps);
 	}
 	trinity_release_mutex(rdev);
 
@@ -1245,6 +1243,7 @@ void trinity_dpm_setup_asic(struct radeon_device *rdev)
 	trinity_release_mutex(rdev);
 }
 
+#if 0
 void trinity_dpm_reset_asic(struct radeon_device *rdev)
 {
 	struct trinity_power_info *pi = trinity_get_pi(rdev);
@@ -1260,6 +1259,7 @@ void trinity_dpm_reset_asic(struct radeon_device *rdev)
 	}
 	trinity_release_mutex(rdev);
 }
+#endif
 
 static u16 trinity_convert_voltage_index_to_value(struct radeon_device *rdev,
 						  u32 vid_2bit)
@@ -1457,7 +1457,35 @@ static void trinity_adjust_uvd_state(struct radeon_device *rdev,
 	}
 }
 
+static int trinity_get_vce_clock_voltage(struct radeon_device *rdev,
+					 u32 evclk, u32 ecclk, u16 *voltage)
+{
+	u32 i;
+	int ret = -EINVAL;
+	struct radeon_vce_clock_voltage_dependency_table *table =
+		&rdev->pm.dpm.dyn_state.vce_clock_voltage_dependency_table;
 
+	if (((evclk == 0) && (ecclk == 0)) ||
+	    (table && (table->count == 0))) {
+		*voltage = 0;
+		return 0;
+	}
+
+	for (i = 0; i < table->count; i++) {
+		if ((evclk <= table->entries[i].evclk) &&
+		    (ecclk <= table->entries[i].ecclk)) {
+			*voltage = table->entries[i].v;
+			ret = 0;
+			break;
+		}
+	}
+
+	/* if no match return the highest voltage */
+	if (ret)
+		*voltage = table->entries[table->count - 1].v;
+
+	return ret;
+}
 
 static void trinity_apply_state_adjust_rules(struct radeon_device *rdev,
 					     struct radeon_ps *new_rps,
@@ -1470,6 +1498,7 @@ static void trinity_apply_state_adjust_rules(struct radeon_device *rdev,
 	u32 min_sclk = pi->sys_info.min_sclk; /* XXX check against disp reqs */
 	u32 sclk_in_sr = pi->sys_info.min_sclk; /* ??? */
 	u32 i;
+	u16 min_vce_voltage;
 	bool force_high;
 	u32 num_active_displays = rdev->pm.dpm.new_active_crtc_count;
 
@@ -1478,6 +1507,14 @@ static void trinity_apply_state_adjust_rules(struct radeon_device *rdev,
 
 	trinity_adjust_uvd_state(rdev, new_rps);
 
+	if (new_rps->vce_active) {
+		new_rps->evclk = rdev->pm.dpm.vce_states[rdev->pm.dpm.vce_level].evclk;
+		new_rps->ecclk = rdev->pm.dpm.vce_states[rdev->pm.dpm.vce_level].ecclk;
+	} else {
+		new_rps->evclk = 0;
+		new_rps->ecclk = 0;
+	}
+
 	for (i = 0; i < ps->num_levels; i++) {
 		if (ps->levels[i].vddc_index < min_voltage)
 			ps->levels[i].vddc_index = min_voltage;
@@ -1485,6 +1522,17 @@ static void trinity_apply_state_adjust_rules(struct radeon_device *rdev,
 		if (ps->levels[i].sclk < min_sclk)
 			ps->levels[i].sclk =
 				trinity_get_valid_engine_clock(rdev, min_sclk);
+
+		/* patch in vce limits */
+		if (new_rps->vce_active) {
+			/* sclk */
+			if (ps->levels[i].sclk < rdev->pm.dpm.vce_states[rdev->pm.dpm.vce_level].sclk)
+				ps->levels[i].sclk = rdev->pm.dpm.vce_states[rdev->pm.dpm.vce_level].sclk;
+			/* vddc */
+			trinity_get_vce_clock_voltage(rdev, new_rps->evclk, new_rps->ecclk, &min_vce_voltage);
+			if (ps->levels[i].vddc_index < min_vce_voltage)
+				ps->levels[i].vddc_index = min_vce_voltage;
+		}
 
 		ps->levels[i].ds_divider_index =
 			sumo_get_sleep_divider_id_from_clock(rdev, ps->levels[i].sclk, sclk_in_sr);
@@ -1646,7 +1694,7 @@ static int trinity_parse_power_table(struct radeon_device *rdev)
 	struct _NonClockInfoArray *non_clock_info_array;
 	union power_info *power_info;
 	int index = GetIndexIntoMasterTable(DATA, PowerPlayInfo);
-        u16 data_offset;
+	u16 data_offset;
 	u8 frev, crev;
 	u8 *power_state_offset;
 	struct sumo_ps *ps;
@@ -1666,15 +1714,14 @@ static int trinity_parse_power_table(struct radeon_device *rdev)
 		(mode_info->atom_context->bios + data_offset +
 		 le16_to_cpu(power_info->pplib.usNonClockInfoArrayOffset));
 
-	rdev->pm.dpm.ps = kzalloc(sizeof(struct radeon_ps) *
-				  state_array->ucNumEntries, GFP_KERNEL);
+	rdev->pm.dpm.ps = kcalloc(state_array->ucNumEntries,
+				  sizeof(struct radeon_ps),
+				  GFP_KERNEL);
 	if (!rdev->pm.dpm.ps)
 		return -ENOMEM;
 	power_state_offset = (u8 *)state_array->states;
-	rdev->pm.dpm.platform_caps = le32_to_cpu(power_info->pplib.ulPlatformCaps);
-	rdev->pm.dpm.backbias_response_time = le16_to_cpu(power_info->pplib.usBackbiasTime);
-	rdev->pm.dpm.voltage_response_time = le16_to_cpu(power_info->pplib.usVoltageTime);
 	for (i = 0; i < state_array->ucNumEntries; i++) {
+		u8 *idx;
 		power_state = (union pplib_power_state *)power_state_offset;
 		non_clock_array_index = power_state->v2.nonClockInfoIndex;
 		non_clock_info = (struct _ATOM_PPLIB_NONCLOCK_INFO *)
@@ -1688,14 +1735,16 @@ static int trinity_parse_power_table(struct radeon_device *rdev)
 		}
 		rdev->pm.dpm.ps[i].ps_priv = ps;
 		k = 0;
+		idx = (u8 *)&power_state->v2.clockInfoIndex[0];
 		for (j = 0; j < power_state->v2.ucNumDPMLevels; j++) {
-			clock_array_index = power_state->v2.clockInfoIndex[j];
+			clock_array_index = idx[j];
 			if (clock_array_index >= clock_info_array->ucNumEntries)
 				continue;
 			if (k >= SUMO_MAX_HARDWARE_POWERLEVELS)
 				break;
 			clock_info = (union pplib_clock_info *)
-				&clock_info_array->clockInfo[clock_array_index * clock_info_array->ucEntrySize];
+				((u8 *)&clock_info_array->clockInfo[0] +
+				 (clock_array_index * clock_info_array->ucEntrySize));
 			trinity_parse_pplib_clock_info(rdev,
 						       &rdev->pm.dpm.ps[i], k,
 						       clock_info);
@@ -1707,6 +1756,19 @@ static int trinity_parse_power_table(struct radeon_device *rdev)
 		power_state_offset += 2 + power_state->v2.ucNumDPMLevels;
 	}
 	rdev->pm.dpm.num_ps = state_array->ucNumEntries;
+
+	/* fill in the vce power states */
+	for (i = 0; i < RADEON_MAX_VCE_LEVELS; i++) {
+		u32 sclk;
+		clock_array_index = rdev->pm.dpm.vce_states[i].clk_idx;
+		clock_info = (union pplib_clock_info *)
+			&clock_info_array->clockInfo[clock_array_index * clock_info_array->ucEntrySize];
+		sclk = le16_to_cpu(clock_info->sumo.usEngineClockLow);
+		sclk |= clock_info->sumo.ucEngineClockHigh << 16;
+		rdev->pm.dpm.vce_states[i].sclk = sclk;
+		rdev->pm.dpm.vce_states[i].mclk = 0;
+	}
+
 	return 0;
 }
 
@@ -1851,13 +1913,29 @@ int trinity_dpm_init(struct radeon_device *rdev)
 	for (i = 0; i < SUMO_MAX_HARDWARE_POWERLEVELS; i++)
 		pi->at[i] = TRINITY_AT_DFLT;
 
+	if (radeon_bapm == -1) {
+		/* There are stability issues reported on with
+		 * bapm enabled when switching between AC and battery
+		 * power.  At the same time, some MSI boards hang
+		 * if it's not enabled and dpm is enabled.  Just enable
+		 * it for MSI boards right now.
+		 */
+		if (rdev->pdev->subsystem_vendor == 0x1462)
+			pi->enable_bapm = true;
+		else
+			pi->enable_bapm = false;
+	} else if (radeon_bapm == 0) {
+		pi->enable_bapm = false;
+	} else {
+		pi->enable_bapm = true;
+	}
 	pi->enable_nbps_policy = true;
 	pi->enable_sclk_ds = true;
 	pi->enable_gfx_power_gating = true;
 	pi->enable_gfx_clock_gating = true;
-	pi->enable_mg_clock_gating = true;
-	pi->enable_gfx_dynamic_mgpg = true; /* ??? */
-	pi->override_dynamic_mgpg = true;
+	pi->enable_mg_clock_gating = false;
+	pi->enable_gfx_dynamic_mgpg = false;
+	pi->override_dynamic_mgpg = false;
 	pi->enable_auto_thermal_throttling = true;
 	pi->voltage_drop_in_dce = false; /* need to restructure dpm/modeset interaction */
 	pi->uvd_dpm = true; /* ??? */
@@ -1867,6 +1945,14 @@ int trinity_dpm_init(struct radeon_device *rdev)
 		return ret;
 
 	trinity_construct_boot_state(rdev);
+
+	ret = r600_get_platform_caps(rdev);
+	if (ret)
+		return ret;
+
+	ret = r600_parse_extended_power_table(rdev);
+	if (ret)
+		return ret;
 
 	ret = trinity_parse_power_table(rdev);
 	if (ret)
@@ -1899,7 +1985,8 @@ void trinity_dpm_print_power_state(struct radeon_device *rdev,
 void trinity_dpm_debugfs_print_current_performance_level(struct radeon_device *rdev,
 							 struct seq_file *m)
 {
-	struct radeon_ps *rps = rdev->pm.dpm.current_ps;
+	struct trinity_power_info *pi = trinity_get_pi(rdev);
+	struct radeon_ps *rps = &pi->current_rps;
 	struct trinity_ps *ps = trinity_get_ps(rps);
 	struct trinity_pl *pl;
 	u32 current_index =
@@ -1917,6 +2004,31 @@ void trinity_dpm_debugfs_print_current_performance_level(struct radeon_device *r
 	}
 }
 
+u32 trinity_dpm_get_current_sclk(struct radeon_device *rdev)
+{
+	struct trinity_power_info *pi = trinity_get_pi(rdev);
+	struct radeon_ps *rps = &pi->current_rps;
+	struct trinity_ps *ps = trinity_get_ps(rps);
+	struct trinity_pl *pl;
+	u32 current_index =
+		(RREG32(TARGET_AND_CURRENT_PROFILE_INDEX) & CURRENT_STATE_MASK) >>
+		CURRENT_STATE_SHIFT;
+
+	if (current_index >= ps->num_levels) {
+		return 0;
+	} else {
+		pl = &ps->levels[current_index];
+		return pl->sclk;
+	}
+}
+
+u32 trinity_dpm_get_current_mclk(struct radeon_device *rdev)
+{
+	struct trinity_power_info *pi = trinity_get_pi(rdev);
+
+	return pi->sys_info.bootup_uma_clk;
+}
+
 void trinity_dpm_fini(struct radeon_device *rdev)
 {
 	int i;
@@ -1928,6 +2040,7 @@ void trinity_dpm_fini(struct radeon_device *rdev)
 	}
 	kfree(rdev->pm.dpm.ps);
 	kfree(rdev->pm.dpm.priv);
+	r600_free_extended_power_table(rdev);
 }
 
 u32 trinity_dpm_get_sclk(struct radeon_device *rdev, bool low)

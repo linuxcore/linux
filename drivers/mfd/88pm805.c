@@ -54,30 +54,17 @@ enum {
 };
 
 static struct resource codec_resources[] = {
-	{
-	 /* Headset microphone insertion or removal */
-	 .name = "micin",
-	 .start = PM805_IRQ_MIC_DET,
-	 .end = PM805_IRQ_MIC_DET,
-	 .flags = IORESOURCE_IRQ,
-	 },
-	{
-	 /* Audio short HP1 */
-	 .name = "audio-short1",
-	 .start = PM805_IRQ_HP1_SHRT,
-	 .end = PM805_IRQ_HP1_SHRT,
-	 .flags = IORESOURCE_IRQ,
-	 },
-	{
-	 /* Audio short HP2 */
-	 .name = "audio-short2",
-	 .start = PM805_IRQ_HP2_SHRT,
-	 .end = PM805_IRQ_HP2_SHRT,
-	 .flags = IORESOURCE_IRQ,
-	 },
+	/* Headset microphone insertion or removal */
+	DEFINE_RES_IRQ_NAMED(PM805_IRQ_MIC_DET, "micin"),
+
+	/* Audio short HP1 */
+	DEFINE_RES_IRQ_NAMED(PM805_IRQ_HP1_SHRT, "audio-short1"),
+
+	/* Audio short HP2 */
+	DEFINE_RES_IRQ_NAMED(PM805_IRQ_HP2_SHRT, "audio-short2"),
 };
 
-static struct mfd_cell codec_devs[] = {
+static const struct mfd_cell codec_devs[] = {
 	{
 	 .name = "88pm80x-codec",
 	 .num_resources = ARRAY_SIZE(codec_resources),
@@ -158,7 +145,7 @@ static int device_irq_init_805(struct pm80x_chip *chip)
 	 * PM805_INT_STATUS is under 32K clock domain, so need to
 	 * add proper delay before the next I2C register access.
 	 */
-	msleep(1);
+	usleep_range(1000, 3000);
 
 	if (ret < 0)
 		goto out;
@@ -227,7 +214,7 @@ static int pm805_probe(struct i2c_client *client,
 {
 	int ret = 0;
 	struct pm80x_chip *chip;
-	struct pm80x_platform_data *pdata = client->dev.platform_data;
+	struct pm80x_platform_data *pdata = dev_get_platdata(&client->dev);
 
 	ret = pm80x_init(client);
 	if (ret) {
@@ -243,7 +230,7 @@ static int pm805_probe(struct i2c_client *client,
 		goto err_805_init;
 	}
 
-	if (pdata->plat_config)
+	if (pdata && pdata->plat_config)
 		pdata->plat_config(chip, pdata);
 
 err_805_init:
@@ -267,7 +254,6 @@ static int pm805_remove(struct i2c_client *client)
 static struct i2c_driver pm805_driver = {
 	.driver = {
 		.name = "88PM805",
-		.owner = THIS_MODULE,
 		.pm = &pm80x_pm_ops,
 		},
 	.probe = pm805_probe,

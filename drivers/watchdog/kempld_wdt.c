@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kontron PLD watchdog driver
  *
  * Copyright (c) 2010-2013 Kontron Europe GmbH
  * Author: Michael Brunner <michael.brunner@kontron.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Note: From the PLD watchdog point of view timeout and pretimeout are
  *       defined differently than in the kernel.
@@ -26,7 +18,6 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/watchdog.h>
 #include <linux/platform_device.h>
@@ -35,7 +26,7 @@
 #define KEMPLD_WDT_STAGE_TIMEOUT(x)	(0x1b + (x) * 4)
 #define KEMPLD_WDT_STAGE_CFG(x)		(0x18 + (x))
 #define STAGE_CFG_GET_PRESCALER(x)	(((x) & 0x30) >> 4)
-#define STAGE_CFG_SET_PRESCALER(x)	(((x) & 0x30) << 4)
+#define STAGE_CFG_SET_PRESCALER(x)	(((x) & 0x3) << 4)
 #define STAGE_CFG_PRESCALER_MASK	0x30
 #define STAGE_CFG_ACTION_MASK		0x7
 #define STAGE_CFG_ASSERT		(1 << 3)
@@ -67,7 +58,7 @@ enum {
 	PRESCALER_12,
 };
 
-const u32 kempld_prescaler[] = {
+static const u32 kempld_prescaler[] = {
 	[PRESCALER_21] = (1 << 21) - 1,
 	[PRESCALER_17] = (1 << 17) - 1,
 	[PRESCALER_12] = (1 << 12) - 1,
@@ -141,11 +132,13 @@ static int kempld_wdt_set_stage_timeout(struct kempld_wdt_data *wdt_data,
 					unsigned int timeout)
 {
 	struct kempld_device_data *pld = wdt_data->pld;
-	u32 prescaler = kempld_prescaler[PRESCALER_21];
+	u32 prescaler;
 	u64 stage_timeout64;
 	u32 stage_timeout;
 	u32 remainder;
 	u8 stage_cfg;
+
+	prescaler = kempld_prescaler[PRESCALER_21];
 
 	if (!stage)
 		return -EINVAL;
@@ -163,7 +156,7 @@ static int kempld_wdt_set_stage_timeout(struct kempld_wdt_data *wdt_data,
 	kempld_get_mutex(pld);
 	stage_cfg = kempld_read8(pld, KEMPLD_WDT_STAGE_CFG(stage->id));
 	stage_cfg &= ~STAGE_CFG_PRESCALER_MASK;
-	stage_cfg |= STAGE_CFG_SET_PRESCALER(prescaler);
+	stage_cfg |= STAGE_CFG_SET_PRESCALER(PRESCALER_21);
 	kempld_write8(pld, KEMPLD_WDT_STAGE_CFG(stage->id), stage_cfg);
 	kempld_write32(pld, KEMPLD_WDT_STAGE_TIMEOUT(stage->id),
 			stage_timeout);
@@ -361,7 +354,7 @@ static long kempld_wdt_ioctl(struct watchdog_device *wdd, unsigned int cmd,
 		ret = kempld_wdt_keepalive(wdd);
 		break;
 	case WDIOC_GETPRETIMEOUT:
-		ret = put_user(wdt_data->pretimeout, (int *)arg);
+		ret = put_user(wdt_data->pretimeout, (int __user *)arg);
 		break;
 	}
 
@@ -423,7 +416,7 @@ static int kempld_wdt_probe_stages(struct watchdog_device *wdd)
 	return 0;
 }
 
-static struct watchdog_info kempld_wdt_info = {
+static const struct watchdog_info kempld_wdt_info = {
 	.identity	= "KEMPLD Watchdog",
 	.options	= WDIOF_SETTIMEOUT |
 			WDIOF_KEEPALIVEPING |
@@ -431,7 +424,7 @@ static struct watchdog_info kempld_wdt_info = {
 			WDIOF_PRETIMEOUT
 };
 
-static struct watchdog_ops kempld_wdt_ops = {
+static const struct watchdog_ops kempld_wdt_ops = {
 	.owner		= THIS_MODULE,
 	.start		= kempld_wdt_start,
 	.stop		= kempld_wdt_stop,
@@ -466,7 +459,7 @@ static int kempld_wdt_probe(struct platform_device *pdev)
 			KEMPLD_WDT_CFG_GLOBAL_LOCK)) {
 		if (!nowayout)
 			dev_warn(dev,
-				"Forcing nowayout - watchdog lock enabled!\n");
+				 "Forcing nowayout - watchdog lock enabled!\n");
 		nowayout = true;
 	}
 
@@ -491,33 +484,15 @@ static int kempld_wdt_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, wdt_data);
-	ret = watchdog_register_device(wdd);
+	watchdog_stop_on_reboot(wdd);
+	watchdog_stop_on_unregister(wdd);
+	ret = devm_watchdog_register_device(dev, wdd);
 	if (ret)
 		return ret;
 
 	dev_info(dev, "Watchdog registered with %ds timeout\n", wdd->timeout);
 
 	return 0;
-}
-
-static void kempld_wdt_shutdown(struct platform_device *pdev)
-{
-	struct kempld_wdt_data *wdt_data = platform_get_drvdata(pdev);
-
-	kempld_wdt_stop(&wdt_data->wdd);
-}
-
-static int kempld_wdt_remove(struct platform_device *pdev)
-{
-	struct kempld_wdt_data *wdt_data = platform_get_drvdata(pdev);
-	struct watchdog_device *wdd = &wdt_data->wdd;
-	int ret = 0;
-
-	if (!nowayout)
-		ret = kempld_wdt_stop(wdd);
-	watchdog_unregister_device(wdd);
-
-	return ret;
 }
 
 #ifdef CONFIG_PM
@@ -564,11 +539,8 @@ static int kempld_wdt_resume(struct platform_device *pdev)
 static struct platform_driver kempld_wdt_driver = {
 	.driver		= {
 		.name	= "kempld-wdt",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= kempld_wdt_probe,
-	.remove		= kempld_wdt_remove,
-	.shutdown	= kempld_wdt_shutdown,
 	.suspend	= kempld_wdt_suspend,
 	.resume		= kempld_wdt_resume,
 };
@@ -578,4 +550,3 @@ module_platform_driver(kempld_wdt_driver);
 MODULE_DESCRIPTION("KEM PLD Watchdog Driver");
 MODULE_AUTHOR("Michael Brunner <michael.brunner@kontron.com>");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

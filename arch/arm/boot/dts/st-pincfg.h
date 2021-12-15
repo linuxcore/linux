@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ST_PINCFG_H_
 #define _ST_PINCFG_H_
 
@@ -15,7 +16,7 @@
 /* Pull Up */
 #define PU			(1 << 26)
 /* Open Drain */
-#define OD			(1 << 26)
+#define OD			(1 << 25)
 #define RT			(1 << 23)
 #define INVERTCLK		(1 << 22)
 #define CLKNOTDATA		(1 << 21)

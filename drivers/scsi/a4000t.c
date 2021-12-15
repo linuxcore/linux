@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Detection routine for the NCR53c710 based Amiga SCSI Controllers for Linux.
  *		Amiga Technologies A4000T SCSI controller.
@@ -56,7 +57,7 @@ static int __init amiga_a4000t_scsi_probe(struct platform_device *pdev)
 	scsi_addr = res->start + A4000T_SCSI_OFFSET;
 
 	/* Fill in the required pieces of hostdata */
-	hostdata->base = (void __iomem *)ZTWO_VADDR(scsi_addr);
+	hostdata->base = ZTWO_VADDR(scsi_addr);
 	hostdata->clock = 50;
 	hostdata->chip710 = 1;
 	hostdata->dmode_extra = DMODE_FC2;
@@ -112,7 +113,6 @@ static struct platform_driver amiga_a4000t_scsi_driver = {
 	.remove = __exit_p(amiga_a4000t_scsi_remove),
 	.driver   = {
 		.name	= "amiga-a4000t-scsi",
-		.owner	= THIS_MODULE,
 	},
 };
 

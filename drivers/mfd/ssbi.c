@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  * Copyright (c) 2010, Google Inc.
  *
@@ -5,15 +6,6 @@
  *
  * Author: Dima Zavin <dima@android.com>
  *  - Largely rewritten from original to not be an i2c driver.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt) "%s: " fmt, __func__
@@ -65,16 +57,20 @@
 
 #define SSBI_TIMEOUT_US			100
 
+enum ssbi_controller_type {
+	MSM_SBI_CTRL_SSBI = 0,
+	MSM_SBI_CTRL_SSBI2,
+	MSM_SBI_CTRL_PMIC_ARBITER,
+};
+
 struct ssbi {
 	struct device		*slave;
 	void __iomem		*base;
 	spinlock_t		lock;
 	enum ssbi_controller_type controller_type;
 	int (*read)(struct ssbi *, u16 addr, u8 *buf, int len);
-	int (*write)(struct ssbi *, u16 addr, u8 *buf, int len);
+	int (*write)(struct ssbi *, u16 addr, const u8 *buf, int len);
 };
-
-#define to_ssbi(dev)	platform_get_drvdata(to_platform_device(dev))
 
 static inline u32 ssbi_readl(struct ssbi *ssbi, u32 reg)
 {
@@ -140,7 +136,7 @@ err:
 }
 
 static int
-ssbi_write_bytes(struct ssbi *ssbi, u16 addr, u8 *buf, int len)
+ssbi_write_bytes(struct ssbi *ssbi, u16 addr, const u8 *buf, int len)
 {
 	int ret = 0;
 
@@ -217,7 +213,7 @@ err:
 }
 
 static int
-ssbi_pa_write_bytes(struct ssbi *ssbi, u16 addr, u8 *buf, int len)
+ssbi_pa_write_bytes(struct ssbi *ssbi, u16 addr, const u8 *buf, int len)
 {
 	u32 cmd;
 	int ret = 0;
@@ -237,7 +233,7 @@ err:
 
 int ssbi_read(struct device *dev, u16 addr, u8 *buf, int len)
 {
-	struct ssbi *ssbi = to_ssbi(dev);
+	struct ssbi *ssbi = dev_get_drvdata(dev);
 	unsigned long flags;
 	int ret;
 
@@ -249,9 +245,9 @@ int ssbi_read(struct device *dev, u16 addr, u8 *buf, int len)
 }
 EXPORT_SYMBOL_GPL(ssbi_read);
 
-int ssbi_write(struct device *dev, u16 addr, u8 *buf, int len)
+int ssbi_write(struct device *dev, u16 addr, const u8 *buf, int len)
 {
-	struct ssbi *ssbi = to_ssbi(dev);
+	struct ssbi *ssbi = dev_get_drvdata(dev);
 	unsigned long flags;
 	int ret;
 
@@ -308,10 +304,10 @@ static int ssbi_probe(struct platform_device *pdev)
 
 	spin_lock_init(&ssbi->lock);
 
-	return of_platform_populate(np, NULL, NULL, &pdev->dev);
+	return devm_of_platform_populate(&pdev->dev);
 }
 
-static struct of_device_id ssbi_match_table[] = {
+static const struct of_device_id ssbi_match_table[] = {
 	{ .compatible = "qcom,ssbi" },
 	{}
 };
@@ -321,7 +317,6 @@ static struct platform_driver ssbi_driver = {
 	.probe		= ssbi_probe,
 	.driver		= {
 		.name	= "ssbi",
-		.owner	= THIS_MODULE,
 		.of_match_table = ssbi_match_table,
 	},
 };

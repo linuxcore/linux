@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * HID driver for Nintendo Wii / Wii U peripherals
  * Copyright (c) 2011-2013 David Herrmann <dh.herrmann@gmail.com>
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/completion.h>
@@ -28,14 +25,14 @@ static int wiimote_hid_send(struct hid_device *hdev, __u8 *buffer,
 	__u8 *buf;
 	int ret;
 
-	if (!hdev->hid_output_raw_report)
+	if (!hdev->ll_driver->output_report)
 		return -ENODEV;
 
 	buf = kmemdup(buffer, count, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	ret = hdev->hid_output_raw_report(hdev, buf, count, HID_OUTPUT_REPORT);
+	ret = hid_hw_output_report(hdev, buf, count);
 
 	kfree(buf);
 	return ret;
@@ -212,10 +209,12 @@ static __u8 select_drm(struct wiimote_data *wdata)
 
 	if (ir == WIIPROTO_FLAG_IR_BASIC) {
 		if (wdata->state.flags & WIIPROTO_FLAG_ACCEL) {
-			if (ext)
-				return WIIPROTO_REQ_DRM_KAIE;
-			else
-				return WIIPROTO_REQ_DRM_KAI;
+			/* GEN10 and ealier devices bind IR formats to DRMs.
+			 * Hence, we cannot use DRM_KAI here as it might be
+			 * bound to IR_EXT. Use DRM_KAIE unconditionally so we
+			 * work with all devices and our parsers can use the
+			 * fixed formats, too. */
+			return WIIPROTO_REQ_DRM_KAIE;
 		} else {
 			return WIIPROTO_REQ_DRM_KIE;
 		}
@@ -439,8 +438,7 @@ static __u8 wiimote_cmd_read_ext(struct wiimote_data *wdata, __u8 *rmem)
 	if (ret != 6)
 		return WIIMOTE_EXT_NONE;
 
-	hid_dbg(wdata->hdev, "extension ID: %02x:%02x %02x:%02x %02x:%02x\n",
-		rmem[0], rmem[1], rmem[2], rmem[3], rmem[4], rmem[5]);
+	hid_dbg(wdata->hdev, "extension ID: %6phC\n", rmem);
 
 	if (rmem[0] == 0xff && rmem[1] == 0xff && rmem[2] == 0xff &&
 	    rmem[3] == 0xff && rmem[4] == 0xff && rmem[5] == 0xff)
@@ -454,6 +452,12 @@ static __u8 wiimote_cmd_read_ext(struct wiimote_data *wdata, __u8 *rmem)
 		return WIIMOTE_EXT_BALANCE_BOARD;
 	if (rmem[4] == 0x01 && rmem[5] == 0x20)
 		return WIIMOTE_EXT_PRO_CONTROLLER;
+	if (rmem[0] == 0x01 && rmem[1] == 0x00 &&
+	    rmem[4] == 0x01 && rmem[5] == 0x03)
+		return WIIMOTE_EXT_DRUMS;
+	if (rmem[0] == 0x00 && rmem[1] == 0x00 &&
+	    rmem[4] == 0x01 && rmem[5] == 0x03)
+		return WIIMOTE_EXT_GUITAR;
 
 	return WIIMOTE_EXT_UNKNOWN;
 }
@@ -487,6 +491,8 @@ static bool wiimote_cmd_map_mp(struct wiimote_data *wdata, __u8 exttype)
 	/* map MP with correct pass-through mode */
 	switch (exttype) {
 	case WIIMOTE_EXT_CLASSIC_CONTROLLER:
+	case WIIMOTE_EXT_DRUMS:
+	case WIIMOTE_EXT_GUITAR:
 		wmem = 0x07;
 		break;
 	case WIIMOTE_EXT_NUNCHUK:
@@ -510,14 +516,12 @@ static bool wiimote_cmd_read_mp(struct wiimote_data *wdata, __u8 *rmem)
 	if (ret != 6)
 		return false;
 
-	hid_dbg(wdata->hdev, "motion plus ID: %02x:%02x %02x:%02x %02x:%02x\n",
-		rmem[0], rmem[1], rmem[2], rmem[3], rmem[4], rmem[5]);
+	hid_dbg(wdata->hdev, "motion plus ID: %6phC\n", rmem);
 
 	if (rmem[5] == 0x05)
 		return true;
 
-	hid_info(wdata->hdev, "unknown motion plus ID: %02x:%02x %02x:%02x %02x:%02x\n",
-		 rmem[0], rmem[1], rmem[2], rmem[3], rmem[4], rmem[5]);
+	hid_info(wdata->hdev, "unknown motion plus ID: %6phC\n", rmem);
 
 	return false;
 }
@@ -533,8 +537,7 @@ static __u8 wiimote_cmd_read_mp_mapped(struct wiimote_data *wdata)
 	if (ret != 6)
 		return WIIMOTE_MP_NONE;
 
-	hid_dbg(wdata->hdev, "mapped motion plus ID: %02x:%02x %02x:%02x %02x:%02x\n",
-		rmem[0], rmem[1], rmem[2], rmem[3], rmem[4], rmem[5]);
+	hid_dbg(wdata->hdev, "mapped motion plus ID: %6phC\n", rmem);
 
 	if (rmem[0] == 0xff && rmem[1] == 0xff && rmem[2] == 0xff &&
 	    rmem[3] == 0xff && rmem[4] == 0xff && rmem[5] == 0xff)
@@ -1077,6 +1080,8 @@ static const char *wiimote_exttype_names[WIIMOTE_EXT_NUM] = {
 	[WIIMOTE_EXT_CLASSIC_CONTROLLER] = "Nintendo Wii Classic Controller",
 	[WIIMOTE_EXT_BALANCE_BOARD] = "Nintendo Wii Balance Board",
 	[WIIMOTE_EXT_PRO_CONTROLLER] = "Nintendo Wii U Pro Controller",
+	[WIIMOTE_EXT_DRUMS] = "Nintendo Wii Drums",
+	[WIIMOTE_EXT_GUITAR] = "Nintendo Wii Guitar",
 };
 
 /*
@@ -1126,9 +1131,8 @@ static void wiimote_init_hotplug(struct wiimote_data *wdata)
 		wiimote_ext_unload(wdata);
 
 		if (exttype == WIIMOTE_EXT_UNKNOWN) {
-			hid_info(wdata->hdev, "cannot detect extension; %02x:%02x %02x:%02x %02x:%02x\n",
-				 extdata[0], extdata[1], extdata[2],
-				 extdata[3], extdata[4], extdata[5]);
+			hid_info(wdata->hdev, "cannot detect extension; %6phC\n",
+				 extdata);
 		} else if (exttype == WIIMOTE_EXT_NONE) {
 			spin_lock_irq(&wdata->state.lock);
 			wdata->state.exttype = WIIMOTE_EXT_NONE;
@@ -1229,9 +1233,9 @@ static void wiimote_schedule(struct wiimote_data *wdata)
 	spin_unlock_irqrestore(&wdata->state.lock, flags);
 }
 
-static void wiimote_init_timeout(unsigned long arg)
+static void wiimote_init_timeout(struct timer_list *t)
 {
-	struct wiimote_data *wdata = (void*)arg;
+	struct wiimote_data *wdata = from_timer(wdata, t, timer);
 
 	wiimote_schedule(wdata);
 }
@@ -1478,7 +1482,7 @@ static void handler_return(struct wiimote_data *wdata, const __u8 *payload)
 		wdata->state.cmd_err = err;
 		wiimote_cmd_complete(wdata);
 	} else if (err) {
-		hid_warn(wdata->hdev, "Remote error %hhu on req %hhu\n", err,
+		hid_warn(wdata->hdev, "Remote error %u on req %u\n", err,
 									cmd);
 	}
 }
@@ -1582,7 +1586,7 @@ struct wiiproto_handler {
 	void (*func)(struct wiimote_data *wdata, const __u8 *payload);
 };
 
-static struct wiiproto_handler handlers[] = {
+static const struct wiiproto_handler handlers[] = {
 	{ .id = WIIPROTO_REQ_STATUS, .size = 6, .func = handler_status },
 	{ .id = WIIPROTO_REQ_STATUS, .size = 2, .func = handler_status_K },
 	{ .id = WIIPROTO_REQ_DATA, .size = 21, .func = handler_data },
@@ -1614,19 +1618,19 @@ static int wiimote_hid_event(struct hid_device *hdev, struct hid_report *report,
 							u8 *raw_data, int size)
 {
 	struct wiimote_data *wdata = hid_get_drvdata(hdev);
-	struct wiiproto_handler *h;
+	const struct wiiproto_handler *h;
 	int i;
 	unsigned long flags;
 
 	if (size < 1)
 		return -EINVAL;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-
 	for (i = 0; handlers[i].id; ++i) {
 		h = &handlers[i];
 		if (h->id == raw_data[0] && h->size < size) {
+			spin_lock_irqsave(&wdata->state.lock, flags);
 			h->func(wdata, &raw_data[1]);
+			spin_unlock_irqrestore(&wdata->state.lock, flags);
 			break;
 		}
 	}
@@ -1634,8 +1638,6 @@ static int wiimote_hid_event(struct hid_device *hdev, struct hid_report *report,
 	if (!handlers[i].id)
 		hid_warn(hdev, "Unhandled report %hhu size %d\n", raw_data[0],
 									size);
-
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
 
 	return 0;
 }
@@ -1663,8 +1665,11 @@ static ssize_t wiimote_ext_show(struct device *dev,
 		return sprintf(buf, "balanceboard\n");
 	case WIIMOTE_EXT_PRO_CONTROLLER:
 		return sprintf(buf, "procontroller\n");
+	case WIIMOTE_EXT_DRUMS:
+		return sprintf(buf, "drums\n");
+	case WIIMOTE_EXT_GUITAR:
+		return sprintf(buf, "guitar\n");
 	case WIIMOTE_EXT_UNKNOWN:
-		/* fallthrough */
 	default:
 		return sprintf(buf, "unknown\n");
 	}
@@ -1714,7 +1719,6 @@ static ssize_t wiimote_dev_show(struct device *dev,
 	case WIIMOTE_DEV_PENDING:
 		return sprintf(buf, "pending\n");
 	case WIIMOTE_DEV_UNKNOWN:
-		/* fallthrough */
 	default:
 		return sprintf(buf, "unknown\n");
 	}
@@ -1743,7 +1747,7 @@ static struct wiimote_data *wiimote_create(struct hid_device *hdev)
 	wdata->state.cmd_battery = 0xff;
 
 	INIT_WORK(&wdata->init_worker, wiimote_init_worker);
-	setup_timer(&wdata->timer, wiimote_init_timeout, (long)wdata);
+	timer_setup(&wdata->timer, wiimote_init_timeout, 0);
 
 	return wdata;
 }
@@ -1862,6 +1866,11 @@ static const struct hid_device_id wiimote_hid_devices[] = {
 				USB_DEVICE_ID_NINTENDO_WIIMOTE2) },
 	{ }
 };
+
+bool wiimote_dpad_as_analog = false;
+module_param_named(dpad_as_analog, wiimote_dpad_as_analog, bool, 0644);
+MODULE_PARM_DESC(dpad_as_analog, "Use D-Pad as main analog input");
+
 MODULE_DEVICE_TABLE(hid, wiimote_hid_devices);
 
 static struct hid_driver wiimote_hid_driver = {

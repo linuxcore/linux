@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * max8907.c - mfd driver for MAX8907
  *
  * Copyright (C) 2010 Gyungoh Yoo <jack.yoo@maxim-ic.com>
  * Copyright (C) 2010-2012, NVIDIA CORPORATION. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/err.h>
@@ -17,11 +14,12 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/max8907.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
-static struct mfd_cell max8907_cells[] = {
+static const struct mfd_cell max8907_cells[] = {
 	{ .name = "max8907-regulator", },
 	{ .name = "max8907-rtc", },
 };
@@ -216,9 +214,9 @@ static int max8907_i2c_probe(struct i2c_client *i2c,
 		goto err_regmap_gen;
 	}
 
-	max8907->i2c_rtc = i2c_new_dummy(i2c->adapter, MAX8907_RTC_I2C_ADDR);
-	if (!max8907->i2c_rtc) {
-		ret = -ENOMEM;
+	max8907->i2c_rtc = i2c_new_dummy_device(i2c->adapter, MAX8907_RTC_I2C_ADDR);
+	if (IS_ERR(max8907->i2c_rtc)) {
+		ret = PTR_ERR(max8907->i2c_rtc);
 		goto err_dummy_rtc;
 	}
 	i2c_set_clientdata(max8907->i2c_rtc, max8907);
@@ -230,11 +228,9 @@ static int max8907_i2c_probe(struct i2c_client *i2c,
 		goto err_regmap_rtc;
 	}
 
-	irq_set_status_flags(max8907->i2c_gen->irq, IRQ_NOAUTOEN);
-
 	ret = regmap_add_irq_chip(max8907->regmap_gen, max8907->i2c_gen->irq,
-				  IRQF_ONESHOT | IRQF_SHARED, -1,
-				  &max8907_chg_irq_chip,
+				  IRQF_ONESHOT | IRQF_SHARED,
+				  -1, &max8907_chg_irq_chip,
 				  &max8907->irqc_chg);
 	if (ret != 0) {
 		dev_err(&i2c->dev, "failed to add chg irq chip: %d\n", ret);
@@ -256,8 +252,6 @@ static int max8907_i2c_probe(struct i2c_client *i2c,
 		dev_err(&i2c->dev, "failed to add rtc irq chip: %d\n", ret);
 		goto err_irqc_rtc;
 	}
-
-	enable_irq(max8907->i2c_gen->irq);
 
 	ret = mfd_add_devices(max8907->dev, -1, max8907_cells,
 			      ARRAY_SIZE(max8907_cells), NULL, 0, NULL);
@@ -304,7 +298,7 @@ static int max8907_i2c_remove(struct i2c_client *i2c)
 }
 
 #ifdef CONFIG_OF
-static struct of_device_id max8907_of_match[] = {
+static const struct of_device_id max8907_of_match[] = {
 	{ .compatible = "maxim,max8907" },
 	{ },
 };
@@ -320,7 +314,6 @@ MODULE_DEVICE_TABLE(i2c, max8907_i2c_id);
 static struct i2c_driver max8907_i2c_driver = {
 	.driver = {
 		.name = "max8907",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(max8907_of_match),
 	},
 	.probe = max8907_i2c_probe,

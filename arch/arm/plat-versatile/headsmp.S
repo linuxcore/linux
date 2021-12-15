@@ -1,15 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/plat-versatile/headsmp.S
  *
  *  Copyright (c) 2003 ARM Limited
  *  All Rights Reserved
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <asm/assembler.h>
 
 /*
  * Realview/Versatile Express specific entry point for secondary CPUs.
@@ -17,6 +15,7 @@
  * until we're ready for them to initialise.
  */
 ENTRY(versatile_secondary_startup)
+ ARM_BE8(setend	be)
 	mrc	p15, 0, r0, c0, c0, 5
 	bic	r0, #0xff000000
 	adr	r4, 1f
@@ -35,5 +34,5 @@ pen:	ldr	r7, [r6]
 
 	.align
 1:	.long	.
-	.long	pen_release
+	.long	versatile_cpu_release
 ENDPROC(versatile_secondary_startup)

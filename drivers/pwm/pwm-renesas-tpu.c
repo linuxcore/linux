@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * R-Mobile TPU PWM driver
  *
  * Copyright (C) 2012 Renesas Solutions Corp.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -20,12 +12,14 @@
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/platform_data/pwm-renesas-tpu.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/pwm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+
+#define TPU_CHANNEL_MAX		4
 
 #define TPU_TSTR		0x00	/* Timer start register (shared) */
 
@@ -86,7 +80,6 @@ struct tpu_pwm_device {
 
 struct tpu_device {
 	struct platform_device *pdev;
-	struct tpu_pwm_platform_data *pdata;
 	struct pwm_chip chip;
 	spinlock_t lock;
 
@@ -228,8 +221,7 @@ static int tpu_pwm_request(struct pwm_chip *chip, struct pwm_device *_pwm)
 
 	pwm->tpu = tpu;
 	pwm->channel = _pwm->hwpwm;
-	pwm->polarity = tpu->pdata ? tpu->pdata->channels[pwm->channel].polarity
-		      : PWM_POLARITY_NORMAL;
+	pwm->polarity = PWM_POLARITY_NORMAL;
 	pwm->prescaler = 0;
 	pwm->period = 0;
 	pwm->duty = 0;
@@ -301,7 +293,7 @@ static int tpu_pwm_config(struct pwm_chip *chip, struct pwm_device *_pwm,
 	pwm->duty = duty;
 
 	/* If the channel is disabled we're done. */
-	if (!test_bit(PWMF_ENABLED, &_pwm->flags))
+	if (!pwm_is_enabled(_pwm))
 		return 0;
 
 	if (duty_only && pwm->timer_on) {
@@ -391,25 +383,17 @@ static const struct pwm_ops tpu_pwm_ops = {
 static int tpu_probe(struct platform_device *pdev)
 {
 	struct tpu_device *tpu;
-	struct resource *res;
 	int ret;
 
 	tpu = devm_kzalloc(&pdev->dev, sizeof(*tpu), GFP_KERNEL);
-	if (tpu == NULL) {
-		dev_err(&pdev->dev, "failed to allocate driver data\n");
+	if (tpu == NULL)
 		return -ENOMEM;
-	}
 
-	tpu->pdata = pdev->dev.platform_data;
+	spin_lock_init(&tpu->lock);
+	tpu->pdev = pdev;
 
 	/* Map memory, get clock and pin control. */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "failed to get I/O memory\n");
-		return -ENXIO;
-	}
-
-	tpu->base = devm_ioremap_resource(&pdev->dev, res);
+	tpu->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(tpu->base))
 		return PTR_ERR(tpu->base);
 
@@ -422,23 +406,18 @@ static int tpu_probe(struct platform_device *pdev)
 	/* Initialize and register the device. */
 	platform_set_drvdata(pdev, tpu);
 
-	spin_lock_init(&tpu->lock);
-	tpu->pdev = pdev;
-
 	tpu->chip.dev = &pdev->dev;
 	tpu->chip.ops = &tpu_pwm_ops;
-	tpu->chip.base = -1;
 	tpu->chip.npwm = TPU_CHANNEL_MAX;
+
+	pm_runtime_enable(&pdev->dev);
 
 	ret = pwmchip_add(&tpu->chip);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to register PWM chip\n");
+		pm_runtime_disable(&pdev->dev);
 		return ret;
 	}
-
-	dev_info(&pdev->dev, "TPU PWM %d registered\n", tpu->pdev->id);
-
-	pm_runtime_enable(&pdev->dev);
 
 	return 0;
 }
@@ -446,23 +425,32 @@ static int tpu_probe(struct platform_device *pdev)
 static int tpu_remove(struct platform_device *pdev)
 {
 	struct tpu_device *tpu = platform_get_drvdata(pdev);
-	int ret;
 
-	ret = pwmchip_remove(&tpu->chip);
-	if (ret)
-		return ret;
+	pwmchip_remove(&tpu->chip);
 
 	pm_runtime_disable(&pdev->dev);
 
 	return 0;
 }
 
+#ifdef CONFIG_OF
+static const struct of_device_id tpu_of_table[] = {
+	{ .compatible = "renesas,tpu-r8a73a4", },
+	{ .compatible = "renesas,tpu-r8a7740", },
+	{ .compatible = "renesas,tpu-r8a7790", },
+	{ .compatible = "renesas,tpu", },
+	{ },
+};
+
+MODULE_DEVICE_TABLE(of, tpu_of_table);
+#endif
+
 static struct platform_driver tpu_driver = {
 	.probe		= tpu_probe,
 	.remove		= tpu_remove,
 	.driver		= {
 		.name	= "renesas-tpu-pwm",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(tpu_of_table),
 	}
 };
 

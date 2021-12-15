@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (C) 2011 Philippe Rétornaz
  *
  * Based on twl4030-pwrbutton driver by:
@@ -20,7 +20,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/input.h>
@@ -259,7 +258,6 @@ static struct platform_driver mc13783_pwrbutton_driver = {
 	.remove		= mc13783_pwrbutton_remove,
 	.driver		= {
 		.name	= "mc13783-pwrbutton",
-		.owner	= THIS_MODULE,
 	},
 };
 
